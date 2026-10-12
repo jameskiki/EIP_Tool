@@ -2,11 +2,12 @@ import queue
 import unittest
 from unittest.mock import patch
 
-from scapy.all import ARP, Ether, IP, UDP
+from scapy.all import ARP, BOOTP, Ether, IP, UDP
 
 from eip_tool.bootp import ServerConfig
 from eip_tool.discovery import list_identity_request
 from eip_tool.network import Workbench
+from tests.test_protocols import MAC, request
 
 
 class NetworkTests(unittest.TestCase):
@@ -88,6 +89,29 @@ class NetworkTests(unittest.TestCase):
         self.worker._emit("stopped", None)
         self.assertEqual(self.worker.events.get_nowait(), ("stopped", None))
         self.assertTrue(self.worker.dropped)
+
+    def test_release_allows_reallocation_after_fresh_conflict_probe(self):
+        worker = Workbench("test-adapter", self.events, ServerConfig(
+            "192.168.1.1", "192.168.1.0/24", "192.168.1.100", "192.168.1.100"))
+        with patch("eip_tool.network.srp", return_value=([], [])) as arp_probe:
+            worker.server.respond(request(1))
+            worker.registry.observe(
+                Ether(src=MAC) / ARP(hwsrc=MAC, psrc="192.168.1.100"))
+            release = request(7)
+            release[BOOTP].ciaddr = "192.168.1.100"
+            worker.registry.observe(release)
+            worker.server.respond(release)
+            offer = worker.server.respond(request(1, mac="00:00:bc:01:02:04"))
+            self.assertEqual(offer[BOOTP].yiaddr, "192.168.1.100")
+            self.assertEqual(arp_probe.call_count, 2)
+
+    def test_stale_observation_triggers_fresh_arp_probe(self):
+        device = self.worker.registry.observe(
+            Ether(src=MAC) / ARP(hwsrc=MAC, psrc="192.168.1.100"))
+        device.last_seen = 0
+        with patch("eip_tool.network.srp", return_value=([], [])) as probe:
+            self.assertFalse(self.worker._in_use("192.168.1.100"))
+            probe.assert_called_once()
 
 
 if __name__ == "__main__":

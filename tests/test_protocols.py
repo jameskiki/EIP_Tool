@@ -22,6 +22,15 @@ def request(kind=None, mac=MAC, **options):
     return Ether(bytes(packet))
 
 
+def vendor_request():
+    packet = request()
+    packet[BOOTP].options = b"\x63\x82\x53\x63\x01\x04\xff\xff\xff\x00\xff"
+    for layer in (IP, UDP):
+        packet[layer].len = None
+        packet[layer].chksum = None
+    return Ether(bytes(packet))
+
+
 def identity_response(name=b"Test drive"):
     item = (struct.pack("<H", 1)
             + struct.pack("!HH4s8s", 2, 44818, b"\xc0\xa8\x01\x64", b"\0" * 8)
@@ -47,6 +56,19 @@ class DiscoveryTests(unittest.TestCase):
         device = self.registry.observe(request(1, requested_addr="10.30.1.4"))
         self.assertEqual(device.ip, "")
         self.assertIn("requested", device.candidate)
+
+    def test_bootp_vendor_extensions_are_not_dhcp(self):
+        decoded = vendor_request()
+        self.assertIn(DHCP, decoded)
+        self.assertEqual(self.registry.observe(decoded).protocols, {"BOOTP"})
+
+    def test_release_clears_observed_address(self):
+        self.registry.observe(Ether(src=MAC) / ARP(hwsrc=MAC, psrc="192.168.1.100"))
+        release = request(7)
+        release[BOOTP].ciaddr = "192.168.1.100"
+        device = self.registry.observe(release)
+        self.assertEqual(device.ip, "")
+        self.assertEqual(device.candidate, "")
 
     def test_static_arp_and_ip_changes_merge_by_mac(self):
         arp = Ether(src=MAC) / ARP(hwsrc=MAC, psrc="10.99.2.3", pdst="10.99.2.3")
@@ -163,11 +185,27 @@ class ServerTests(unittest.TestCase):
         self.assertNotIn("message-type", dhcp_options(decoded))
         self.assertEqual(self.server.leases[MAC][1], float("inf"))
 
+    def test_bootp_request_with_rfc1048_vendor_extensions_gets_reply(self):
+        decoded = vendor_request()
+        self.assertIn(DHCP, decoded)
+        reply = self.server.respond(decoded)
+        self.assertEqual(reply[BOOTP].yiaddr, "192.168.1.100")
+        self.assertNotIn("message-type", dhcp_options(Ether(bytes(reply))))
+        self.assertEqual(self.server.leases[MAC][1], float("inf"))
+
     def test_conflicting_address_is_skipped(self):
         server = BootpServer(self.config, SERVER_MAC,
                              in_use=lambda ip: ip == "192.168.1.100")
         self.assertEqual(server.respond(request(1))[BOOTP].yiaddr, "192.168.1.101")
 
+    def test_transient_conflict_is_not_permanently_blocked(self):
+        conflict = [True]
+        server = BootpServer(self.config, SERVER_MAC,
+                             in_use=lambda ip: conflict[0] and ip == "192.168.1.100")
+        self.assertEqual(server.respond(request(1))[BOOTP].yiaddr, "192.168.1.101")
+        conflict[0] = False
+        self.assertEqual(server.respond(request(1, mac="00:00:bc:01:02:04"))
+                         [BOOTP].yiaddr, "192.168.1.100")
     def test_stable_leases_exhaustion_and_release(self):
         self.assertEqual(self.server.respond(request(1))[BOOTP].yiaddr, "192.168.1.100")
         self.assertEqual(self.server.respond(request(1))[BOOTP].yiaddr, "192.168.1.100")

@@ -72,10 +72,12 @@ before powering the device.
 The service handles direct Ethernet BOOTP requests and DHCP
 Discover/Offer/Request/ACK, renewal, release, and decline. It sends Layer-2
 replies on the selected adapter, honoring the client's broadcast flag or current
-address, without advertising a gateway or DNS server. Relayed requests and requests selecting a different DHCP server
+address, without advertising a gateway or DNS server. Relayed requests and
+requests selecting a different DHCP server
 are ignored. DHCP requests are acknowledged only for bindings offered by this
 running session; clients with an old lease may need to retry discovery.
-Addresses are checked against observed devices and an ARP probe before offering.
+Addresses are checked against recent (last minute) observations and a fresh ARP
+probe before offering. A DHCP release clears the client's observed address.
 **A nonresponsive device may still hold that IP: conflict checks are best-effort,
 so use a pool you know is free.**
 

@@ -60,7 +60,6 @@ class BootpServer:
             if ip in used:
                 continue
             if self.in_use(ip):
-                self.blocked.add(ip)
                 continue
             self.leases[mac] = (ip, float("inf") if permanent else now + 60)
             return ip
@@ -78,7 +77,8 @@ class BootpServer:
         if not valid_mac(mac) or mac == self.server_mac.lower():
             return None
         options = dhcp_options(packet)
-        is_dhcp = DHCP in packet
+        # RFC 1048 BOOTP vendor extensions also decode as Scapy's DHCP layer.
+        is_dhcp = "message-type" in options
         kind = options.get("message-type")
         if isinstance(kind, bytes) and len(kind) == 1:
             kind = kind[0]

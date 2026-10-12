@@ -96,15 +96,18 @@ class DeviceRegistry:
             return None
         mac = packet[Ether].src.lower()
         ip, candidate, protocol, identity = "", "", "Ethernet", ""
+        released = False
         if BOOTP in packet:
             bootp = packet[BOOTP]
             if bootp.op != 1 or bootp.htype != 1 or bootp.hlen != 6:
                 return None
             mac = bytes(bootp.chaddr)[:6].hex(":")
-            protocol = "DHCP" if DHCP in packet else "BOOTP"
+            options = dhcp_options(packet)
+            protocol = "DHCP" if "message-type" in options else "BOOTP"
+            released = options.get("message-type") == 7
             if usable_ip(bootp.ciaddr):
                 ip = bootp.ciaddr
-            requested = dhcp_options(packet).get("requested_addr")
+            requested = options.get("requested_addr")
             if requested and usable_ip(requested):
                 candidate = f"{requested} (requested)"
         elif ARP in packet:
@@ -139,7 +142,10 @@ class DeviceRegistry:
                 manufacturer = "Locally administered / unknown"
             self.devices[mac] = Device(mac, manufacturer)
         device = self.devices[mac]
-        if ip:
+        if released:
+            device.ip = ""
+            device.candidate = ""
+        elif ip:
             device.ip = str(ip)
             device.candidate = ""
         elif candidate:

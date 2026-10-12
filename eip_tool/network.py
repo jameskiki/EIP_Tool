@@ -3,6 +3,7 @@
 import os
 import queue
 import threading
+import time
 from ipaddress import IPv4Address, IPv4Network
 
 from scapy.all import (
@@ -90,7 +91,8 @@ class Workbench:
     def _in_use(self, ip):
         if self.stop_event.is_set():
             raise RuntimeError("Address assignment stopped.")
-        if any(device.ip == ip for device in self.registry.devices.values()):
+        if any(device.ip == ip and time.time() - device.last_seen < 60
+               for device in self.registry.devices.values()):
             return True
         answers, _ = srp(
             Ether(src=self.mac, dst="ff:ff:ff:ff:ff:ff")
