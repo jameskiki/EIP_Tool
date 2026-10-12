@@ -1,0 +1,19 @@
+[project]
+name = "eip-tool"
+version = "0.1.0"
+description = "Offline workbench Ethernet/IP device discovery"
+requires-python = ">=3.12"
+dependencies = [
+    "manuf==1.1.5",
+    "scapy==2.8.0",
+]
+
+[build-system]
+requires = ["setuptools==84.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project.scripts]
+eip-tool = "eip_tool.gui:main"
+
+[tool.setuptools.packages.find]
+include = ["eip_tool*"]
