@@ -1,0 +1,33 @@
+version = 1
+revision = 5
+requires-python = ">=3.12"
+
+[[package]]
+name = "eip-tool"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "manuf" },
+    { name = "scapy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "manuf", specifier = "==1.1.5" },
+    { name = "scapy", specifier = "==2.8.0" },
+]
+
+[[package]]
+name = "manuf"
+version = "1.1.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/0a/a3/9db33765f9d962de4b113c2f07b6d5bab4521ed4feec4cb97cbf18184602/manuf-1.1.5.tar.gz", hash = "sha256:741989728c8ffd0d5c5782376c00270fcd48cf7544f58bf9492a0ef674d433cd", size = 596531, upload-time = "2022-01-08T02:07:00.88Z" }
+
+[[package]]
+name = "scapy"
+version = "2.8.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/80/06/f7e09b3240196326fb343d6bd931cafedd26ae1dfdbd7cd0183cae3029d3/scapy-2.8.0.tar.gz", hash = "sha256:0eacd1f940d115611c1b8a4696f315b4b80caf2951e546893a3d0cd7f6bfd6fd", size = 2578223, upload-time = "2026-10-02T16:25:18.874Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b9/1e/f07107ed79e69a659f1ab65ee7894d71fc1cf15108cf475782d3979a480d/scapy-2.8.0-py3-none-any.whl", hash = "sha256:abf855145ee829a42b2eb28983cd6a0a52b12a31d3f861cb7be36791195ed9aa", size = 2762122, upload-time = "2026-10-02T16:25:17.26Z" },
+]
