@@ -91,7 +91,7 @@ class Workbench:
     def _in_use(self, ip):
         if self.stop_event.is_set():
             raise RuntimeError("Address assignment stopped.")
-        if any(device.ip == ip and time.time() - device.last_seen < 60
+        if any(device.ip == ip and time.time() - device.ip_seen < 60
                for device in self.registry.devices.values()):
             return True
         answers, _ = srp(

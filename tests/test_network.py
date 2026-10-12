@@ -108,10 +108,27 @@ class NetworkTests(unittest.TestCase):
     def test_stale_observation_triggers_fresh_arp_probe(self):
         device = self.worker.registry.observe(
             Ether(src=MAC) / ARP(hwsrc=MAC, psrc="192.168.1.100"))
-        device.last_seen = 0
+        device.ip_seen = 0
         with patch("eip_tool.network.srp", return_value=([], [])) as probe:
             self.assertFalse(self.worker._in_use("192.168.1.100"))
             probe.assert_called_once()
+
+    def test_boot_retries_do_not_refresh_stale_ip_ownership(self):
+        worker = Workbench("test-adapter", self.events, ServerConfig(
+            "192.168.1.1", "192.168.1.0/24", "192.168.1.100", "192.168.1.100"))
+        device = worker.registry.observe(
+            Ether(src=MAC) / ARP(hwsrc=MAC, psrc="192.168.1.100"))
+        device.ip_seen = 0
+        worker.server.leases[MAC] = ("192.168.1.100", 0)
+        with patch("eip_tool.network.srp", return_value=([], [])) as probe:
+            for _ in range(3):
+                packet = request(1)
+                worker.registry.observe(packet)
+                self.assertEqual(worker.server.respond(packet)[BOOTP].yiaddr,
+                                 "192.168.1.100")
+            probe.assert_called_once()
+        self.assertEqual(device.ip_seen, 0)
+        self.assertGreater(device.last_seen, 0)
 
 
 if __name__ == "__main__":

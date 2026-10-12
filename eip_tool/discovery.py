@@ -83,6 +83,7 @@ class Device:
     protocols: set = field(default_factory=set)
     identity: str = ""
     last_seen: float = field(default_factory=time.time)
+    ip_seen: float = 0
 
 
 class DeviceRegistry:
@@ -142,16 +143,19 @@ class DeviceRegistry:
                 manufacturer = "Locally administered / unknown"
             self.devices[mac] = Device(mac, manufacturer)
         device = self.devices[mac]
+        now = time.time()
         if released:
             device.ip = ""
             device.candidate = ""
+            device.ip_seen = 0
         elif ip:
             device.ip = str(ip)
             device.candidate = ""
+            device.ip_seen = now
         elif candidate:
             device.candidate = candidate
         device.protocols.add(protocol)
         if identity:
             device.identity = identity
-        device.last_seen = time.time()
+        device.last_seen = now
         return device

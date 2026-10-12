@@ -76,8 +76,9 @@ address, without advertising a gateway or DNS server. Relayed requests and
 requests selecting a different DHCP server
 are ignored. DHCP requests are acknowledged only for bindings offered by this
 running session; clients with an old lease may need to retry discovery.
-Addresses are checked against recent (last minute) observations and a fresh ARP
-probe before offering. A DHCP release clears the client's observed address.
+Addresses are checked against recent (last minute) IP observations and a fresh
+ARP probe before offering. Boot requests without an IP do not refresh address
+ownership; a DHCP release clears the client's observed address.
 **A nonresponsive device may still hold that IP: conflict checks are best-effort,
 so use a pool you know is free.**
 
