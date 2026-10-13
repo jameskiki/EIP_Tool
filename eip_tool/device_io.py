@@ -31,7 +31,7 @@ PRESETS = [
         "expected_words": 54,
         "expected_bytes": 108,
         "alive_word": 27,
-        "description": "VT-015131 CVC 650 EIP: Input Assembly 54 words (108 bytes) — Word 27: Alive Counter",
+        "description": "VT-015131 CVC 650 EIP: Input 54 words (108 bytes) — Word 27 (bytes 54-55): Alive Counter",
     },
     {
         "name": "VT-015131 CVC 650 EIP — Output (Inst 102) [16 words / 32 bytes]",
@@ -42,53 +42,30 @@ PRESETS = [
         "expected_words": 16,
         "expected_bytes": 32,
         "alive_word": None,
-        "description": "VT-015131 CVC 650 EIP: Output Assembly 16 words (32 bytes)",
+        "description": "VT-015131 CVC 650 EIP: Output 16 words (32 bytes)",
     },
-    # VT-016246 MAI 114 EIP
+    # MAI 114 / 314 Group (identical assembly mapping)
     {
-        "name": "VT-016246 MAI 114 EIP — Input (Inst 101) [8 words / 16 bytes]",
-        "device": "VT-016246 MAI 114 EIP",
+        "name": "VT-016246/016403 MAI 114 / 314 EIP — Input (Inst 101) [8 words / 16 bytes]",
+        "device": "MAI 114 / 314 EIP",
         "class_code": 0x04,
         "instance": 101,
         "attribute": 3,
         "expected_words": 8,
         "expected_bytes": 16,
-        "alive_word": None,
-        "description": "VT-016246 MAI 114 EIP: Input Assembly 8 words (16 bytes)",
+        "alive_word": 7,
+        "description": "MAI 114 / 314 EIP: Input 8 words (16 bytes) — Word 7 (bytes 14-15): Alive Counter",
     },
     {
-        "name": "VT-016246 MAI 114 EIP — Output (Inst 102) [6 words / 12 bytes]",
-        "device": "VT-016246 MAI 114 EIP",
+        "name": "VT-016246/016403 MAI 114 / 314 EIP — Output (Inst 102) [6 words / 12 bytes]",
+        "device": "MAI 114 / 314 EIP",
         "class_code": 0x04,
         "instance": 102,
         "attribute": 3,
         "expected_words": 6,
         "expected_bytes": 12,
         "alive_word": None,
-        "description": "VT-016246 MAI 114 EIP: Output Assembly 6 words (12 bytes)",
-    },
-    # VT-016403 MAI 314 EIP
-    {
-        "name": "VT-016403 MAI 314 EIP — Input (Inst 101) [8 words / 16 bytes]",
-        "device": "VT-016403 MAI 314 EIP",
-        "class_code": 0x04,
-        "instance": 101,
-        "attribute": 3,
-        "expected_words": 8,
-        "expected_bytes": 16,
-        "alive_word": None,
-        "description": "VT-016403 MAI 314 EIP: Input Assembly 8 words (16 bytes)",
-    },
-    {
-        "name": "VT-016403 MAI 314 EIP — Output (Inst 102) [6 words / 12 bytes]",
-        "device": "VT-016403 MAI 314 EIP",
-        "class_code": 0x04,
-        "instance": 102,
-        "attribute": 3,
-        "expected_words": 6,
-        "expected_bytes": 12,
-        "alive_word": None,
-        "description": "VT-016403 MAI 314 EIP: Output Assembly 6 words (12 bytes)",
+        "description": "MAI 114 / 314 EIP: Output 6 words (12 bytes)",
     },
     # VT-019279 MAI 315 EIP
     {
@@ -99,8 +76,8 @@ PRESETS = [
         "attribute": 3,
         "expected_words": 12,
         "expected_bytes": 24,
-        "alive_word": None,
-        "description": "VT-019279 MAI 315 EIP: Input Assembly 12 words (24 bytes)",
+        "alive_word": 7,
+        "description": "VT-019279 MAI 315 EIP: Input 12 words (24 bytes) — Word 7 (bytes 14-15): Alive Counter",
     },
     {
         "name": "VT-019279 MAI 315 EIP — Output (Inst 102) [8 words / 16 bytes]",
@@ -111,7 +88,7 @@ PRESETS = [
         "expected_words": 8,
         "expected_bytes": 16,
         "alive_word": None,
-        "description": "VT-019279 MAI 315 EIP: Output Assembly 8 words (16 bytes)",
+        "description": "VT-019279 MAI 315 EIP: Output 8 words (16 bytes)",
     },
     # Configuration Object & Custom
     {
@@ -287,7 +264,7 @@ class DeviceIOTestDialog:
         self.polling = False
         self.poll_thread = None
         self.last_data = b""
-        self.last_word27_val = None
+        self.last_alive_val = None
         self.alive_tick_count = 0
         self.event_queue = queue.Queue()
         self._poll_job = None
@@ -374,7 +351,8 @@ class DeviceIOTestDialog:
         # Alive Counter Monitor Bar
         alive_bar = ttk.Frame(read_frame)
         alive_bar.pack(fill="x", pady=(2, 6))
-        ttk.Label(alive_bar, text="Alive Counter (Word 27):", font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 4))
+        self.alive_title_var = tk.StringVar(value="Alive Counter (Word 27):")
+        ttk.Label(alive_bar, textvariable=self.alive_title_var, font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 4))
         self.alive_val_var = tk.StringVar(value="--")
         ttk.Label(alive_bar, textvariable=self.alive_val_var, font=("Consolas", 10, "bold"), foreground="#0066cc").pack(side="left", padx=(0, 10))
         self.alive_status_var = tk.StringVar(value="(Click 'Read Once' or 'Start Polling')")
@@ -478,6 +456,17 @@ class DeviceIOTestDialog:
             else:
                 self.expected_label_var.set("Configurable CIP assembly / object")
 
+            # Update Alive Counter title label according to model
+            alive_w = p.get("alive_word")
+            if alive_w is not None:
+                self.alive_title_var.set(f"Alive Counter (Word {alive_w}, bytes {alive_w*2}-{alive_w*2+1}):")
+            else:
+                self.alive_title_var.set("Alive Counter:")
+            self.last_alive_val = None
+            self.alive_val_var.set("--")
+            self.alive_status_var.set("(Click 'Read Once' or 'Start Polling')")
+            self.alive_status_lbl.configure(foreground="#333333")
+
     def _get_cip_targets(self):
         try:
             class_code = self._parse_int(self.class_var.get())
@@ -516,12 +505,22 @@ class DeviceIOTestDialog:
             words = len(data) // 2
             self.read_status_var.set(f"Last read: {len(data)} bytes ({words} words) at {now_str} — Success")
 
-            # Check alive counter at Word 27 (bytes 54-55)
+            # Check alive counter for the current model
             preset = self._current_preset()
-            if len(data) >= 56:
-                val_w27 = struct.unpack("<H", data[54:56])[0]
-                if self.last_word27_val is not None:
-                    diff = (val_w27 - self.last_word27_val) & 0xFFFF
+            alive_w = preset.get("alive_word") if preset else None
+            # If no preset or custom, auto-detect between word 27 (CVC 650) and word 7 (MAI series)
+            if alive_w is None:
+                if len(data) >= 56:
+                    alive_w = 27
+                elif len(data) >= 16:
+                    alive_w = 7
+
+            if alive_w is not None and len(data) >= (alive_w + 1) * 2:
+                byte_off = alive_w * 2
+                val_alive = struct.unpack("<H", data[byte_off:byte_off + 2])[0]
+                self.alive_title_var.set(f"Alive Counter (Word {alive_w}, bytes {byte_off}-{byte_off+1}):")
+                if self.last_alive_val is not None:
+                    diff = (val_alive - self.last_alive_val) & 0xFFFF
                     if diff > 0:
                         self.alive_tick_count += 1
                         self.alive_status_var.set(f"Ticking! (+{diff}, updates: {self.alive_tick_count})")
@@ -530,18 +529,18 @@ class DeviceIOTestDialog:
                         self.alive_status_var.set("Static / not incremented since last read")
                         self.alive_status_lbl.configure(foreground="#cc6600")
                     else:
-                        self.alive_status_var.set(f"Changed (new value: {val_w27})")
+                        self.alive_status_var.set(f"Changed (new value: {val_alive})")
                         self.alive_status_lbl.configure(foreground="#008800")
                 else:
                     self.alive_status_var.set("Initial read recorded")
                     self.alive_status_lbl.configure(foreground="#333333")
-                self.last_word27_val = val_w27
-                self.alive_val_var.set(f"{val_w27} (0x{val_w27:04X}) [Word 27, bytes 54-55]")
+                self.last_alive_val = val_alive
+                self.alive_val_var.set(f"{val_alive} (0x{val_alive:04X})")
             else:
                 self.alive_val_var.set("N/A")
                 model_name = preset.get("device", "This device") if preset else "This device"
                 self.alive_status_var.set(
-                    f"{model_name} response is {len(data)} bytes ({words} words) — Word 27 is not in this model's mapping")
+                    f"{model_name} response is {len(data)} bytes ({words} words) — no counter mapped")
                 self.alive_status_lbl.configure(foreground="#666666")
 
             self._refresh_data_display()
@@ -566,9 +565,16 @@ class DeviceIOTestDialog:
             annotations = {}
             try:
                 class_code, instance, attribute = self._get_cip_targets()
-                if instance == 101:
-                    annotations[27] = "Alive Counter (0-indexed Word 27, bytes 54-55)"
-                    annotations[26] = "Word 26 (27th word if 1-indexed, bytes 52-53)"
+                preset = self._current_preset()
+                alive_w = preset.get("alive_word") if preset else None
+                if alive_w is not None:
+                    annotations[alive_w] = f"Alive Counter (Word {alive_w}, bytes {alive_w*2}-{alive_w*2+1})"
+                elif instance == 101:
+                    # Generic input assembly fallback
+                    if len(self.last_data) >= 56:
+                        annotations[27] = "Alive Counter (Word 27, bytes 54-55)"
+                    if len(self.last_data) >= 16:
+                        annotations[7] = "Alive Counter for MAI series (Word 7, bytes 14-15)"
             except ValueError:
                 pass
 

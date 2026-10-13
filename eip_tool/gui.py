@@ -24,6 +24,7 @@ from .discovery import usable_ip
 from .interface_address import (
     add_temporary_ipv4_alias, find_ready_adapter_address, remove_temporary_ipv4_alias,
 )
+from .lantronix_diagnostics import LantronixDiagnosticsDialog
 from .network import Workbench
 from .xport_config import (
     apply_static_xport_address, set_bootp_mode, validate_static_parameters,
@@ -544,6 +545,10 @@ class Application:
         self.xport_button = ttk.Button(
             arp_frame, text="XPort discovery", command=self.probe_xport, state="disabled")
         self.xport_button.grid(row=0, column=3)
+        self.diagnostics_button = ttk.Button(
+            arp_frame, text="Lantronix diagnostics", command=self.read_selected_diagnostics,
+            state="disabled")
+        self.diagnostics_button.grid(row=0, column=4, padx=(6, 0))
         arp_frame.columnconfigure(1, weight=1)
         ttk.Label(panel, text="Targets accept IP, CIDR, or ranges; blank uses the default scan subnet.").grid(
             row=4, column=0, columnspan=6, sticky="w", pady=(4, 0))
@@ -701,9 +706,24 @@ class Application:
             self._queue_probe(self.worker.xport_discovery)
 
     def update_configuration_button(self, event=None):
-        state = "normal" if self.table.selection() else "disabled"
-        self.configure_button.configure(state=state)
-        self.test_io_button.configure(state=state)
+        selection = self.table.selection()
+        self.configure_button.configure(state="normal" if selection else "disabled")
+        self.test_io_button.configure(state="normal" if selection else "disabled")
+        has_ip = bool(selection and usable_ip(self.table.set(selection[0], "ip")))
+        self.diagnostics_button.configure(state="normal" if has_ip else "disabled")
+
+    def read_selected_diagnostics(self):
+        selection = self.table.selection()
+        if not selection:
+            return
+        values = self.table.item(selection[0], "values")
+        mac, address = values[0], values[1]
+        if not usable_ip(address):
+            messagebox.showerror(
+                "No observed IP", "Discover or assign an IP before reading device diagnostics.",
+                parent=self.root)
+            return
+        LantronixDiagnosticsDialog(self.root, mac, address)
 
     def test_selected_io(self):
         selection = self.table.selection()

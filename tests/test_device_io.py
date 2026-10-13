@@ -203,18 +203,30 @@ class DeviceIODialogTests(unittest.TestCase):
         self.assertIn("Alive Counter", text_content)
 
     def test_device_model_presets_and_short_assemblies(self):
-        # Test MAI 114 preset
-        mai_114_preset = next(p for p in PRESETS if "MAI 114" in p["name"] and "Input" in p["name"])
-        self.dialog.preset_combo.set(mai_114_preset["name"])
+        # Test MAI 114 / 314 preset
+        mai_preset = next(p for p in PRESETS if "MAI 114 / 314" in p["name"] and "Input" in p["name"])
+        self.dialog.preset_combo.set(mai_preset["name"])
         self.dialog._on_preset_selected()
         self.assertEqual(self.dialog.inst_var.get(), "101")
         self.assertIn("8 words", self.dialog.expected_label_var.get())
+        self.assertIn("Word 7", self.dialog.alive_title_var.get())
 
-        # An 8-word (16-byte) read for MAI 114 should report N/A for Word 27
-        self.dialog._on_read_success(bytes([0] * 16))
-        self.assertEqual(self.dialog.alive_val_var.get(), "N/A")
-        self.assertIn("MAI 114", self.dialog.alive_status_var.get())
-        self.assertIn("16 bytes (8 words)", self.dialog.alive_status_var.get())
+        # An 8-word (16-byte) read for MAI 114 / 314 should track alive counter at Word 7 (bytes 14-15)
+        payload1 = bytearray(16)
+        struct.pack_into("<H", payload1, 14, 42)
+        self.dialog._on_read_success(bytes(payload1))
+        self.assertIn("42 (0x002A)", self.dialog.alive_val_var.get())
+        self.assertIn("Initial read", self.dialog.alive_status_var.get())
+
+        payload2 = bytearray(16)
+        struct.pack_into("<H", payload2, 14, 43)
+        self.dialog._on_read_success(bytes(payload2))
+        self.assertIn("43 (0x002B)", self.dialog.alive_val_var.get())
+        self.assertIn("Ticking! (+1", self.dialog.alive_status_var.get())
+
+        # Text view should annotate Word 7
+        text_content = self.dialog.data_text.get("1.0", "end")
+        self.assertIn("Alive Counter (Word 7", text_content)
 
         # Test MAI 315 preset
         mai_315_preset = next(p for p in PRESETS if "MAI 315" in p["name"] and "Input" in p["name"])
@@ -222,12 +234,13 @@ class DeviceIODialogTests(unittest.TestCase):
         self.dialog._on_preset_selected()
         self.assertEqual(self.dialog.inst_var.get(), "101")
         self.assertIn("12 words", self.dialog.expected_label_var.get())
+        self.assertIn("Word 7", self.dialog.alive_title_var.get())
 
-        # A 12-word (24-byte) read for MAI 315 should report N/A for Word 27
-        self.dialog._on_read_success(bytes([0] * 24))
-        self.assertEqual(self.dialog.alive_val_var.get(), "N/A")
-        self.assertIn("MAI 315", self.dialog.alive_status_var.get())
-        self.assertIn("24 bytes (12 words)", self.dialog.alive_status_var.get())
+        # A 12-word (24-byte) read for MAI 315 should also track alive counter at Word 7 (bytes 14-15)
+        payload_315 = bytearray(24)
+        struct.pack_into("<H", payload_315, 14, 99)
+        self.dialog._on_read_success(bytes(payload_315))
+        self.assertIn("99 (0x0063)", self.dialog.alive_val_var.get())
 
         # Test fill expected zeroes for MAI 315 Output (8 words = 16 bytes)
         mai_315_out = next(p for p in PRESETS if "MAI 315" in p["name"] and "Output" in p["name"])

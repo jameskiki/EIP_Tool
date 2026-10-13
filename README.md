@@ -61,6 +61,11 @@ Install dependencies before taking the laptop offline.
 6. Click **Stop** before changing adapters, subnet, or service configuration.
    Stopping closes capture and ends the service. Rows remain until the next start.
 
+For a selected device with an observed IP, **Lantronix diagnostics** queries TCP
+port `9999` and displays the read-only setup/status menu (model, firmware, and
+network settings, when available). It sends Enter only after the setup prompt;
+it does not send menu selections or modify the device.
+
 Select a device row and click **Configure selected** for EtherNet/IP
 configuration. The app accesses the TCP/IP Interface Object (class `0xF5`)
 through CIP, checks the device's configuration capability, and verifies writes.

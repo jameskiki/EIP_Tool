@@ -76,9 +76,30 @@ class GuiTests(unittest.TestCase):
         self.app.update_configuration_button()
         self.assertEqual(str(self.app.configure_button["state"]), "normal")
         self.assertEqual(str(self.app.test_io_button["state"]), "normal")
+        self.assertEqual(str(self.app.diagnostics_button["state"]), "normal")
         with patch("eip_tool.gui.XPortConfigurationGuide") as guide:
             self.app.configure_selected()
         self.assertEqual(guide.call_args.args[:3], (self.root, mac, ip))
+
+    def test_selected_device_opens_lantronix_diagnostics(self):
+        mac = "00:80:a3:d7:b7:f5"
+        ip = "192.168.20.200"
+        self.app.table.insert("", "end", iid=mac, values=(
+            mac, ip, "", "Lantronix", "ARP", "", ip, "", ""))
+        self.app.table.selection_set(mac)
+        self.app.update_configuration_button()
+        self.assertEqual(str(self.app.diagnostics_button["state"]), "normal")
+        with patch("eip_tool.gui.LantronixDiagnosticsDialog") as dialog:
+            self.app.read_selected_diagnostics()
+        dialog.assert_called_once_with(self.root, mac, ip)
+
+    def test_diagnostics_button_requires_observed_ip(self):
+        mac = "00:80:a3:d7:b7:f5"
+        self.app.table.insert("", "end", iid=mac, values=(
+            mac, "", "", "Lantronix", "BOOTP", "", "", "", ""))
+        self.app.table.selection_set(mac)
+        self.app.update_configuration_button()
+        self.assertEqual(str(self.app.diagnostics_button["state"]), "disabled")
 
     def test_selected_device_opens_device_io_dialog(self):
         mac = "00:00:bc:01:02:03"
