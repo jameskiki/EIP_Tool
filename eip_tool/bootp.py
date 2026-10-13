@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv4Network
 import time
 
-from scapy.all import BOOTP, DHCP, Ether, IP, UDP
+from scapy.all import BOOTP, DHCP, Ether, IP, Raw, UDP
 
 from .discovery import dhcp_options, valid_mac
 
@@ -16,6 +16,8 @@ class ServerConfig:
     pool_start: str
     pool_end: str
     lease_seconds: int = 3600
+    reservation_mac: str = ""
+    reservation_ip: str = ""
 
     def validate(self):
         network = IPv4Network(self.network, strict=False)
@@ -33,6 +35,17 @@ class ServerConfig:
             raise ValueError("Pool is limited to 1024 addresses.")
         if not 60 <= self.lease_seconds <= 86400:
             raise ValueError("Lease must be between 60 and 86400 seconds.")
+        if bool(self.reservation_mac) != bool(self.reservation_ip):
+            raise ValueError("A reserved address requires both a device MAC and IPv4 address.")
+        if self.reservation_mac:
+            if not valid_mac(self.reservation_mac):
+                raise ValueError("The reservation MAC address is invalid.")
+            reserved = IPv4Address(self.reservation_ip)
+            if (reserved not in network or reserved in
+                    (network.network_address, network.broadcast_address)
+                    or reserved == server or reserved.is_multicast
+                    or reserved.is_loopback or reserved.is_unspecified):
+                raise ValueError("The reserved address must be a usable host in the subnet, excluding the server.")
         return network
 
 
@@ -54,6 +67,15 @@ class BootpServer:
                 self.leases[mac] = (self.leases[mac][0], float("inf"))
             return self.leases[mac][0]
         used = {value[0] for value in self.leases.values()} | self.blocked
+        reserved_ip = self.config.reservation_ip
+        if mac.lower() == self.config.reservation_mac.lower() and reserved_ip:
+            if reserved_ip in used or self.in_use(reserved_ip):
+                return None
+            self.leases[mac] = (
+                reserved_ip, float("inf") if permanent else now + 60)
+            return reserved_ip
+        if reserved_ip:
+            used.add(reserved_ip)
         for number in range(int(IPv4Address(self.config.pool_start)),
                             int(IPv4Address(self.config.pool_end)) + 1):
             ip = str(IPv4Address(number))
@@ -109,7 +131,8 @@ class BootpServer:
             return None
         if request.ciaddr != "0.0.0.0":
             destination_ip, destination_mac = request.ciaddr, mac
-        elif int(request.flags) & 0x8000:
+        elif int(request.flags) & 0x8000 or not is_dhcp:
+            # Classic BOOTP clients may not yet accept unicast at yiaddr.
             destination_ip, destination_mac = "255.255.255.255", "ff:ff:ff:ff:ff:ff"
         else:
             destination_ip, destination_mac = ip, mac
@@ -126,8 +149,12 @@ class BootpServer:
                 ("server_id", self.config.server_ip),
                 ("lease_time", self.config.lease_seconds),
                 *common, "end"])
+            payload_length = len(bytes(reply[UDP].payload))
+            if payload_length < 300:
+                reply /= Raw(load=b"\0" * (300 - payload_length))
         else:
             # RFC 1048 vendor extensions for classic BOOTP, without DHCP type.
-            reply[BOOTP].options = (b"\x63\x82\x53\x63\x01\x04"
-                                    + self.network.netmask.packed + b"\xff")
+            vendor_data = (b"\x63\x82\x53\x63\x01\x04"
+                           + self.network.netmask.packed + b"\xff")
+            reply[BOOTP].options = vendor_data.ljust(64, b"\0")
         return reply

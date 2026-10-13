@@ -78,6 +78,36 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(len(self.registry.devices), 1)
         self.assertEqual(device.protocols, {"ARP", "IPv4"})
 
+    def test_first_seen_is_stable_and_observed_ips_accumulate_by_mac(self):
+        first_packet = Ether(src=MAC) / ARP(hwsrc=MAC, psrc="192.168.1.20")
+        second_packet = Ether(src=MAC) / IP(src="192.168.0.20")
+        third_packet = Ether(src=MAC) / IP(src="192.168.1.20")
+        with patch("eip_tool.discovery.time.time", side_effect=[100, 200, 300]):
+            first = self.registry.observe(first_packet)
+            self.assertEqual(first.first_seen, 100)
+            device = self.registry.observe(second_packet)
+            self.registry.observe(third_packet)
+        self.assertIs(first, device)
+        self.assertEqual(device.first_seen, 100)
+        self.assertEqual(device.last_seen, 300)
+        self.assertEqual(device.ip, "192.168.1.20")
+        self.assertEqual(device.ip_history, {"192.168.1.20": 300, "192.168.0.20": 200})
+        self.assertEqual(len(self.registry.devices), 1)
+
+    def test_unconfirmed_addresses_are_not_added_to_ip_history(self):
+        device = self.registry.observe(request(1, requested_addr="192.168.1.20"))
+        self.registry.observe(Ether(src=MAC) / ARP(
+            hwsrc=MAC, psrc="0.0.0.0", pdst="192.168.1.30"))
+        self.assertEqual(device.ip_history, {})
+
+    def test_release_keeps_ip_history_but_clears_latest_ip(self):
+        self.registry.observe(Ether(src=MAC) / IP(src="192.168.1.20"))
+        release = request(7)
+        release[BOOTP].ciaddr = "192.168.1.20"
+        device = self.registry.observe(release)
+        self.assertEqual(device.ip, "")
+        self.assertIn("192.168.1.20", device.ip_history)
+
     def test_link_local_probe_is_tentative_until_announcement(self):
         device = self.registry.observe(
             Ether(src=MAC) / ARP(hwsrc=MAC, psrc="0.0.0.0", pdst="169.254.5.6"))
@@ -107,6 +137,15 @@ class DiscoveryTests(unittest.TestCase):
         self.assertIn("EtherNet/IP", device.protocols)
         self.assertIn("Test drive", device.identity)
         self.assertIn("12345678", device.identity)
+
+    def test_lantronix_discovery_reply_merges_unknown_subnet_ip_by_mac(self):
+        payload = b"\x00\x00\x00\xf7" + b"\0" * 20 + bytes.fromhex(MAC.replace(":", ""))
+        packet = (Ether(src=MAC) / IP(src="10.20.30.40")
+                  / UDP(sport=30718, dport=30718) / Raw(payload))
+        device = self.registry.observe(Ether(bytes(packet)))
+        self.assertEqual(device.mac, MAC)
+        self.assertEqual(device.ip, "10.20.30.40")
+        self.assertIn("Lantronix LDP", device.protocols)
 
     def test_truncated_identity_and_bad_status_are_ignored(self):
         data = identity_response()
@@ -147,6 +186,7 @@ class ServerTests(unittest.TestCase):
         decoded = Ether(bytes(ack))
         self.assertEqual(decoded[BOOTP].yiaddr, "192.168.1.100")
         self.assertEqual(dhcp_options(decoded)["subnet_mask"], "255.255.255.0")
+        self.assertGreaterEqual(len(bytes(decoded[UDP].payload)), 300)
 
     def test_renewal_ciaddr(self):
         self.server.respond(request(1))
@@ -164,6 +204,13 @@ class ServerTests(unittest.TestCase):
         reply = self.server.respond(packet)
         self.assertEqual(reply[IP].dst, "192.168.1.100")
         self.assertEqual(reply[Ether].dst, MAC)
+
+    def test_initial_bootp_reply_is_broadcast_when_flag_is_clear(self):
+        packet = request()
+        packet[BOOTP].flags = 0
+        reply = self.server.respond(packet)
+        self.assertEqual(reply[IP].dst, "255.255.255.255")
+        self.assertEqual(reply[Ether].dst, "ff:ff:ff:ff:ff:ff")
 
     def test_bootp_converts_existing_reservation_to_permanent(self):
         self.server.respond(request(1))
@@ -184,6 +231,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(dhcp_options(decoded)["subnet_mask"], "255.255.255.0")
         self.assertNotIn("message-type", dhcp_options(decoded))
         self.assertEqual(self.server.leases[MAC][1], float("inf"))
+        self.assertEqual(len(bytes(decoded[UDP].payload)), 300)
 
     def test_bootp_request_with_rfc1048_vendor_extensions_gets_reply(self):
         decoded = vendor_request()
@@ -197,6 +245,25 @@ class ServerTests(unittest.TestCase):
         server = BootpServer(self.config, SERVER_MAC,
                              in_use=lambda ip: ip == "192.168.1.100")
         self.assertEqual(server.respond(request(1))[BOOTP].yiaddr, "192.168.1.101")
+
+    def test_reserved_address_is_assigned_to_selected_mac_only(self):
+        config = ServerConfig(
+            "192.168.1.1", "192.168.1.0/24", "192.168.1.100", "192.168.1.101",
+            reservation_mac=MAC, reservation_ip="192.168.1.101")
+        server = BootpServer(config, SERVER_MAC)
+        self.assertEqual(server.respond(request(1))[BOOTP].yiaddr, "192.168.1.101")
+        self.assertEqual(server.respond(request(1, mac="00:00:bc:01:02:04"))[BOOTP].yiaddr,
+                         "192.168.1.100")
+
+    def test_reserved_address_conflict_is_not_offered(self):
+        config = ServerConfig(
+            "192.168.1.1", "192.168.1.0/24", "192.168.1.100", "192.168.1.101",
+            reservation_mac=MAC, reservation_ip="192.168.1.101")
+        server = BootpServer(config, SERVER_MAC,
+                             in_use=lambda ip: ip == "192.168.1.101")
+        self.assertIsNone(server.respond(request(1)))
+        self.assertEqual(server.respond(request(1, mac="00:00:bc:01:02:04"))[BOOTP].yiaddr,
+                         "192.168.1.100")
 
     def test_transient_conflict_is_not_permanently_blocked(self):
         conflict = [True]
@@ -253,6 +320,9 @@ class ServerTests(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 ServerConfig(server, "192.168.1.0/24", start, end).validate()
+        with self.assertRaisesRegex(ValueError, "both a device MAC and IPv4"):
+            ServerConfig("192.168.1.1", "192.168.1.0/24", "192.168.1.100",
+                         "192.168.1.101", reservation_mac=MAC).validate()
 
 
 if __name__ == "__main__":

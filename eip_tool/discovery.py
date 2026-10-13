@@ -84,6 +84,8 @@ class Device:
     identity: str = ""
     last_seen: float = field(default_factory=time.time)
     ip_seen: float = 0
+    first_seen: float = field(default_factory=time.time)
+    ip_history: dict = field(default_factory=dict)
 
 
 class DeviceRegistry:
@@ -125,15 +127,24 @@ class DeviceRegistry:
             protocol = "IPv4"
             if usable_ip(packet[IP].src):
                 ip = packet[IP].src
-            if UDP in packet and packet[UDP].sport == 44818:
-                identities = parse_identity(bytes(packet[UDP].payload))
-                if identities:
-                    protocol = "EtherNet/IP"
-                    item = identities[0]
-                    identity = (f"{item['name']} | vendor {item['vendor_id']} | "
-                                f"rev {item['revision']} | serial {item['serial']}")
+            if UDP in packet:
+                if packet[UDP].sport == 44818:
+                    identities = parse_identity(bytes(packet[UDP].payload))
+                    if identities:
+                        protocol = "EtherNet/IP"
+                        item = identities[0]
+                        identity = (f"{item['name']} | vendor {item['vendor_id']} | "
+                                    f"rev {item['revision']} | serial {item['serial']}")
+                elif (packet[UDP].sport == 30718
+                      and bytes(packet[UDP].payload).startswith(b"\x00\x00\x00\xf7")):
+                    response = bytes(packet[UDP].payload)
+                    if len(response) >= 30:
+                        advertised_mac = response[24:30].hex(":")
+                        if advertised_mac == mac:
+                            protocol = "Lantronix LDP"
         if not valid_mac(mac) or mac == self.own_mac:
             return None
+        now = time.time()
         if mac not in self.devices:
             if len(self.devices) >= 4096:
                 return None
@@ -141,15 +152,15 @@ class DeviceRegistry:
             manufacturer = (vendor.manuf_long or vendor.manuf) if vendor else "Unknown"
             if int(mac[:2], 16) & 2:
                 manufacturer = "Locally administered / unknown"
-            self.devices[mac] = Device(mac, manufacturer)
+            self.devices[mac] = Device(mac, manufacturer, first_seen=now, last_seen=now)
         device = self.devices[mac]
-        now = time.time()
         if released:
             device.ip = ""
             device.candidate = ""
             device.ip_seen = 0
         elif ip:
             device.ip = str(ip)
+            device.ip_history[device.ip] = now
             device.candidate = ""
             device.ip_seen = now
         elif candidate:

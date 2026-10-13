@@ -7,12 +7,96 @@ import time
 from ipaddress import IPv4Address, IPv4Network
 
 from scapy.all import (
-    ARP, AsyncSniffer, BOOTP, Ether, IP, UDP, conf, get_if_addr,
+    ARP, AsyncSniffer, BOOTP, Ether, IP, Raw, UDP, conf, get_if_addr,
     get_if_hwaddr, sendp, srp,
 )
 
 from .bootp import BootpServer
-from .discovery import DeviceRegistry, list_identity_request, usable_ip
+from .discovery import DeviceRegistry, dhcp_options, list_identity_request, usable_ip
+
+MAX_SCAN_TARGETS = 4096
+
+
+def assignment_status(request, response):
+    address = response[BOOTP].yiaddr
+    delivery = "broadcast" if response[Ether].dst == "ff:ff:ff:ff:ff:ff" else "unicast"
+    destination = response[IP].dst
+    kind = dhcp_options(request).get("message-type")
+    if isinstance(kind, bytes) and len(kind) == 1:
+        kind = kind[0]
+    if kind == 1:
+        return (f"DHCP Offer sent for {address} by {delivery} to {destination}; "
+                "waiting for the device's DHCP Request.")
+    if kind == 3:
+        return (f"DHCP ACK sent for {address} by {delivery} to {destination}; "
+                "awaiting device traffic to confirm use.")
+    broadcast_flag = "set" if int(request[BOOTP].flags) & 0x8000 else "clear"
+    return (f"BOOTP reply sent for {address} by {delivery} to {destination} "
+            f"(client broadcast flag {broadcast_flag}); acceptance unconfirmed until "
+            "device traffic is observed.")
+
+
+def build_scan_plan(target, network, adapter_ip):
+    if not usable_ip(adapter_ip):
+        raise ValueError("Configure an IPv4 address before sending active probes.")
+    if not target:
+        subnet = IPv4Network(network, strict=False)
+        if IPv4Address(adapter_ip) not in subnet:
+            raise ValueError("The scan subnet must contain the adapter's IPv4 address.")
+        if subnet.num_addresses > 1024:
+            raise ValueError("Default subnet scans are limited to 1024 addresses.")
+        hosts = [str(address) for address in subnet.hosts()
+                 if str(address) != adapter_ip]
+        return [(hosts, str(subnet.broadcast_address))]
+
+    groups = []
+    seen = set()
+    total = 0
+    tokens = target.replace(";", ",").split(",")
+    if any(not token.strip() for token in tokens):
+        raise ValueError("Separate scan targets with commas or semicolons.")
+    for raw_token in tokens:
+        token = raw_token.strip()
+        if "/" in token:
+            subnet = IPv4Network(token, strict=False)
+            count = (subnet.num_addresses if subnet.prefixlen >= 31
+                     else subnet.num_addresses - 2)
+            destination = str(subnet.broadcast_address)
+            addresses = subnet.hosts()
+        elif "-" in token:
+            first_text, last_text = token.split("-", 1)
+            first, last = IPv4Address(first_text.strip()), IPv4Address(last_text.strip())
+            if first > last:
+                raise ValueError(f"IP range is reversed: {token}")
+            count = int(last) - int(first) + 1
+            destination = "255.255.255.255"
+            addresses = (IPv4Address(number)
+                         for number in range(int(first), int(last) + 1))
+        else:
+            address = IPv4Address(token)
+            if not usable_ip(str(address)):
+                raise ValueError(f"Scan target is not a usable IPv4 address: {token}")
+            selected_subnet = IPv4Network(network, strict=False)
+            if (address in selected_subnet and address in
+                    (selected_subnet.network_address, selected_subnet.broadcast_address)):
+                raise ValueError(f"Scan target is not a host address: {token}")
+            count = 1
+            destination = str(address)
+            addresses = (address,)
+        if total + count > MAX_SCAN_TARGETS:
+            raise ValueError(f"A scan is limited to {MAX_SCAN_TARGETS} addresses.")
+        hosts = []
+        for address in addresses:
+            host = str(address)
+            if host != adapter_ip and host not in seen and usable_ip(host):
+                seen.add(host)
+                hosts.append(host)
+        total += len(hosts)
+        if hosts:
+            groups.append((hosts, destination))
+    if not groups:
+        raise ValueError("The scan targets contain no usable addresses.")
+    return groups
 
 
 class Workbench:
@@ -23,6 +107,7 @@ class Workbench:
         self.mac = get_if_hwaddr(interface)
         self.registry = DeviceRegistry(self.mac, oui_file)
         self.server = None
+        self.pending_assignments = {}
         if server_config:
             if not usable_ip(self.ip):
                 raise ValueError("Configure an IPv4 address before enabling BOOTP/DHCP.")
@@ -43,29 +128,29 @@ class Workbench:
     def stop(self):
         self.stop_event.set()
 
-    def probe(self, target, network):
+    def _queue_probe(self, command):
         if not usable_ip(self.ip):
             raise ValueError("Configure an IPv4 address before sending active probes.")
-        subnet = IPv4Network(network, strict=False)
-        if IPv4Address(self.ip) not in subnet:
-            raise ValueError("The scan subnet must contain the adapter's IPv4 address.")
-        if target:
-            address = IPv4Address(target)
-            if (not usable_ip(str(address)) or address in
-                    (subnet.network_address, subnet.broadcast_address)
-                    or address not in subnet):
-                raise ValueError("Target must be a host in the configured scan subnet.")
-            hosts = [str(address)]
-            broadcast = str(address)
-        else:
-            if subnet.num_addresses > 1024:
-                raise ValueError("ARP scans are limited to 1024 addresses; use a smaller subnet.")
-            hosts = [str(ip) for ip in subnet.hosts() if str(ip) != self.ip]
-            broadcast = str(subnet.broadcast_address)
         try:
-            self.commands.put_nowait((hosts, broadcast))
+            self.commands.put_nowait(command)
         except queue.Full:
-            raise ValueError("Scan queue is full. Wait for the current scans to finish.") from None
+            raise ValueError("Probe queue is full. Wait for the current probe to finish.") from None
+
+    def eip_broadcast(self):
+        self._queue_probe(("eip_broadcast", None))
+
+    def eip_targeted(self, target, network):
+        plan = build_scan_plan(target, network, self.ip)
+        hosts = list(dict.fromkeys(host for group, _ in plan for host in group))
+        self._queue_probe(("eip_targeted", hosts))
+
+    def arp_scan(self, target, network):
+        plan = build_scan_plan(target, network, self.ip)
+        hosts = list(dict.fromkeys(host for group, _ in plan for host in group))
+        self._queue_probe(("arp_scan", hosts))
+
+    def xport_discovery(self):
+        self._queue_probe(("xport_discovery", None))
 
     def _capture(self, packet):
         try:
@@ -88,6 +173,36 @@ class Workbench:
             except queue.Full:
                 pass
 
+    def _confirm_assignment(self, device):
+        if (device.ip and device.ip_seen == device.last_seen
+                and self.pending_assignments.get(device.mac) == device.ip):
+            del self.pending_assignments[device.mac]
+            self._emit("assignment_confirmed", (device.mac, device.ip))
+
+    def _process_packet(self, packet):
+        device = self.registry.observe(packet)
+        if device:
+            self._emit("device", (
+                device.mac, device.ip, device.candidate,
+                device.manufacturer, ", ".join(sorted(device.protocols)),
+                device.identity,
+                ", ".join(sorted(device.ip_history, key=IPv4Address)),
+                device.first_seen, device.last_seen))
+            self._confirm_assignment(device)
+        if not self.server:
+            return
+        response = self.server.respond(packet)
+        if response:
+            sendp(response, iface=self.interface, verbose=False)
+            mac = bytes(packet[BOOTP].chaddr)[:6].hex(":")
+            self.pending_assignments[mac] = response[BOOTP].yiaddr
+            self._emit("status", assignment_status(packet, response))
+        elif BOOTP in packet and packet[BOOTP].op == 1:
+            mac = bytes(packet[BOOTP].chaddr)[:6].hex(":")
+            self._emit(
+                "status",
+                f"BOOTP/DHCP request received from {mac}, but no address reply was generated.")
+
     def _in_use(self, ip):
         if self.stop_event.is_set():
             raise RuntimeError("Address assignment stopped.")
@@ -102,13 +217,21 @@ class Workbench:
             self._capture(response)
         return bool(answers)
 
-    def _send_probe(self, hosts, destination):
-        context = os.urandom(8)
+    def _send_eip_identity(self, destination):
         query = (Ether(src=self.mac, dst="ff:ff:ff:ff:ff:ff")
                  / IP(src=self.ip, dst=destination)
                  / UDP(sport=44818, dport=44818)
-                 / list_identity_request(context))
+                 / list_identity_request(os.urandom(8)))
         sendp(query, iface=self.interface, verbose=False)
+
+    def _send_xport_discovery(self):
+        sendp(Ether(src=self.mac, dst="ff:ff:ff:ff:ff:ff")
+              / IP(src=self.ip, dst="255.255.255.255")
+              / UDP(sport=30718, dport=30718)
+              / Raw(load=b"\x00\x00\x00\xf6"),
+              iface=self.interface, verbose=False)
+
+    def _send_arp_scan(self, hosts):
         for host in hosts:
             if self.stop_event.is_set():
                 break
@@ -117,11 +240,29 @@ class Workbench:
                   iface=self.interface, verbose=False)
             # Throttle probes, while the independent sniffer keeps capturing.
             self.stop_event.wait(0.01)
-        self._emit("status", "Scan sent; listening for replies.")
 
     def _probe_worker(self, command):
         try:
-            self._send_probe(*command)
+            kind, payload = command
+            if kind == "eip_broadcast":
+                self._send_eip_identity("255.255.255.255")
+                status = "EtherNet/IP broadcast sent; listening for replies."
+            elif kind == "eip_targeted":
+                for host in payload:
+                    if self.stop_event.is_set():
+                        break
+                    self._send_eip_identity(host)
+                    self.stop_event.wait(0.01)
+                status = f"Targeted EtherNet/IP probes sent to {len(payload)} address(es)."
+            elif kind == "arp_scan":
+                self._send_arp_scan(payload)
+                status = f"ARP probes sent to {len(payload)} address(es)."
+            elif kind == "xport_discovery":
+                self._send_xport_discovery()
+                status = "Lantronix/XPort discovery broadcast sent; listening for replies."
+            else:
+                raise ValueError(f"Unknown probe type: {kind}")
+            self._emit("status", status)
         except Exception as error:
             self._emit("error", f"Probe failed: {error}")
 
@@ -159,20 +300,7 @@ class Workbench:
                 except queue.Empty:
                     continue
                 try:
-                    device = self.registry.observe(packet)
-                    if device:
-                        # Immutable snapshot; no shared mutable GUI/device state.
-                        self._emit("device", (
-                            device.mac, device.ip, device.candidate,
-                            device.manufacturer, ", ".join(sorted(device.protocols)),
-                            device.identity, device.last_seen))
-                    if self.server:
-                        response = self.server.respond(packet)
-                        if response:
-                            sendp(response, iface=self.interface, verbose=False)
-                            self._emit("status",
-                                       f"Offered/assigned {response[BOOTP].yiaddr}; "
-                                       "waiting for traffic to confirm the device IP.")
+                    self._process_packet(packet)
                 except (ValueError, TypeError, IndexError, AttributeError):
                     # Ignore malformed frames; one bad packet must not stop capture.
                     continue
