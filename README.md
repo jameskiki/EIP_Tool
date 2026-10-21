@@ -61,10 +61,13 @@ Install dependencies before taking the laptop offline.
 6. Click **Stop** before changing adapters, subnet, or service configuration.
    Stopping closes capture and ends the service. Rows remain until the next start.
 
-For a selected device with an observed IP, **Lantronix diagnostics** queries TCP
+For a selected device with an observed IP, the **Lantronix diagnostics** tab's
+**Read diagnostics (port 9999)** button queries TCP
 port `9999` and displays the read-only setup/status menu (model, firmware, and
 network settings, when available). It sends Enter only after the setup prompt;
-it does not send menu selections or modify the device.
+it does not send menu selections or modify the device. A refused connection
+means the device has no port 9999 setup service (not a Lantronix device, or
+Telnet setup disabled); it says nothing about IP or EtherNet/IP reachability.
 
 Select a device row and click **Configure selected** for EtherNet/IP
 configuration. The app accesses the TCP/IP Interface Object (class `0xF5`)
@@ -95,7 +98,31 @@ removed when the guide removes it or the app exits normally. If the app is
 forcibly terminated, the active-only alias may need to be removed manually or
 will disappear after reboot. Then use **Set static IPv4** to configure the device.
 
-Select a discovered device row and click **Test device I/O** to test peripheral
+The device table stays visible at the top; Config, Device I/O, Lantronix
+diagnostics, CIP Objects, and CIP Scanner are tabs below it (drag the divider to resize). On **CIP Objects**,
+**0x01 Identity**, **0xF5 TCP/IP**, and **0xF6 Ethernet Link** (or **Read all**)
+read every known attribute of the selected device with read-only
+Get_Attribute_Single requests; unsupported attributes are marked as such.
+
+The **CIP Scanner** tab discovers which classes, instances, and attributes the
+selected device actually implements, using read-only Get_Attribute_Single probes:
+- **Classes** accepts ranges such as `0x01-0xFF`, `0x04, 0xF5-0xF6`, or decimals.
+  With **Message Router list** enabled, classes the device advertises in Message
+  Router (class `0x02`) attribute 1 are added, including vendor classes above `0xFF`.
+- Class attributes (instance 0) are read; *Max Instance* (attribute 2) bounds the
+  instance probe and *Max Instance Attribute ID* (attribute 7) the attribute probe.
+  **Max instance** / **Max attribute** cap the probe so slow devices stay usable;
+  a note is shown when a device reports more instances than the cap.
+- CIP status `0x05`/`0x16` means "does not exist" and `0x14` means "instance
+  exists, attribute not supported". Devices that answer `0x08` (service not supported)
+  for everything are only listed for a class if instance 1 proves it exists.
+- Known attributes are named and decoded; others get a best-effort guess
+  (SHORT_STRING/STRING/UINT/UDINT/words) plus raw hex. Double-click an attribute
+  (or **Open in Device I/O**) to read/write it on the Device I/O tab, and use
+  **Export CSV...** to save the result. **Stop** ends the scan after the current request.
+
+Select a discovered device row and click **Load selected device** on the
+**Device I/O** tab to test peripheral
 communication directly through CIP explicit messaging (Assembly Object class `0x04`):
 - **Device Model Presets**:
   - **VT-015131 CVC 650 EIP**: Input Inst 101 = 54 words (108 bytes, Word 27 Alive Counter); Output Inst 102 = 16 words (32 bytes).
@@ -112,6 +139,18 @@ communication directly through CIP explicit messaging (Assembly Object class `0x
   common word lengths (6w, 8w, 16w, 54w), or test patterns.
 - **View formats**: Switch between 16-bit word view (word offsets, hex, unsigned/signed decimal),
   standard hex dump with ASCII, and raw hex bytes.
+- **Cyclic I/O connection (Class 1, like a PLC)**: Some adapters - e.g. the Lantronix
+  XPort-EIP-MB Modbus gateway - only refresh their input assembly while a scanner owns them,
+  so explicit reads return zeros (Identity status bit 0 "Owned" is clear). **Open I/O connection**
+  sends a Forward_Open (input = T->O, output = O->T, config instance, RPI; sizes are filled from
+  the selected preset) and then exchanges UDP packets on port 2222 at the RPI, showing live input
+  data in the view above. Inputs are requested point-to-point, falling back to multicast if the
+  device rejects that. While connected, **Write to Device** sets the cyclic output data instead of
+  using Set_Attribute_Single; outputs are sent with the *Idle* flag unless **Run mode** is ticked.
+  **Close I/O connection** sends Forward_Close. Only one scanner can own a device's outputs, so
+  disconnect a PLC first (ownership conflict `0x0106`). If no input packets arrive, allow inbound
+  UDP 2222 for Python in Windows Firewall and make sure no other EtherNet/IP tool uses port 2222.
+  See [docs/connection-flows.md](docs/connection-flows.md) for flow charts of every step and why it works.
 If a device has neither a reachable IP nor BOOTP/DHCP enabled, Ethernet-only
 configuration may be impossible; use the board's supported serial or recovery
 method.

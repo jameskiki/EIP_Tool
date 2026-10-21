@@ -81,18 +81,23 @@ def read_lantronix_diagnostics(address: str, port: int = 9999,
 class LantronixDiagnosticsDialog:
     """Read-only UI for the Lantronix setup/status menu."""
 
-    def __init__(self, root, mac: str, address: str):
+    def __init__(self, root, mac: str, address: str, inline: bool = False):
         self.root = root
         self.address = address
+        self.inline = inline
         self.events = queue.Queue()
         self.poll_job = None
-        self.window = tk.Toplevel(root)
-        self.window.title(f"Device diagnostics — {address}")
-        self.window.geometry("760x520")
-        self.window.transient(root)
-        self.window.protocol("WM_DELETE_WINDOW", self.close)
+        if inline:
+            self.window = ttk.Frame(root)
+            self.window.pack(fill="both", expand=True)
+        else:
+            self.window = tk.Toplevel(root)
+            self.window.title(f"Device diagnostics — {address}")
+            self.window.geometry("760x520")
+            self.window.transient(root)
+            self.window.protocol("WM_DELETE_WINDOW", self.close)
 
-        panel = ttk.Frame(self.window, padding=10)
+        panel = ttk.Frame(self.window, padding=0 if inline else 10)
         panel.pack(fill="both", expand=True)
         ttk.Label(panel, text=f"Lantronix setup/status menu | MAC {mac} | {address}").pack(
             anchor="w", pady=(0, 6))
@@ -100,7 +105,8 @@ class LantronixDiagnosticsDialog:
             anchor="w", pady=(0, 6))
         controls = ttk.Frame(panel)
         controls.pack(fill="x", pady=(0, 6))
-        self.read_button = ttk.Button(controls, text="Read diagnostics", command=self.read)
+        self.read_button = ttk.Button(
+            controls, text="Refresh" if inline else "Read diagnostics", command=self.read)
         self.read_button.pack(side="left")
         self.status = tk.StringVar(value="Ready")
         ttk.Label(controls, textvariable=self.status).pack(side="left", padx=8)
@@ -139,7 +145,7 @@ class LantronixDiagnosticsDialog:
                 self.output.delete("1.0", "end")
                 self.output.insert("1.0", result)
                 self.output.configure(state="disabled")
-                if kind == "error":
+                if kind == "error" and not self.inline:
                     messagebox.showerror("Device diagnostics failed", result, parent=self.window)
             self.poll_job = self.window.after(50, self._poll)
         except tk.TclError:

@@ -19,6 +19,8 @@ if __package__ in (None, ""):
     __package__ = "eip_tool"
 
 from .bootp import ServerConfig
+from .cip_objects import OBJECTS, CIPObjectError, read_cip_object
+from .cip_scanner_panel import CIPScannerPanel
 from .device_io import DeviceIOTestDialog
 from .discovery import usable_ip
 from .interface_address import (
@@ -460,11 +462,35 @@ class Application:
         self.adapter_aliases = []
         self.events = queue.Queue(maxsize=4096)
         self.closing = False
+        self._poll_job = None
+        self.device_io_dialog = None
         root.title("Workbench Device Discovery — EtherNet/IP")
-        root.geometry("1200x700")
+        root.geometry("1200x820")
         root.protocol("WM_DELETE_WINDOW", self.close)
         panel = ttk.Frame(root, padding=10)
         panel.pack(fill="both", expand=True)
+        self.status = tk.StringVar(value="Select a wired adapter, then start before powering the device.")
+        # Status bar is packed first so it stays visible below the resizable panes.
+        ttk.Label(panel, textvariable=self.status, wraplength=1100).pack(
+            side="bottom", fill="x", pady=(8, 0))
+        self.paned = ttk.PanedWindow(panel, orient="vertical")
+        self.paned.pack(fill="both", expand=True)
+        self.discovery_tab = ttk.Frame(self.paned, padding=8)
+        self.notebook = ttk.Notebook(self.paned)
+        self.paned.add(self.discovery_tab, weight=3)
+        self.paned.add(self.notebook, weight=2)
+        self.config_tab = ttk.Frame(self.notebook, padding=8)
+        self.io_tab = ttk.Frame(self.notebook, padding=8)
+        self.diagnostics_tab = ttk.Frame(self.notebook, padding=8)
+        self.cip_tab = ttk.Frame(self.notebook, padding=8)
+        self.scanner_tab = ttk.Frame(self.notebook, padding=8)
+        self.device_io_dialog = None
+        self.diagnostics_panel = None
+        self.notebook.add(self.config_tab, text="Config")
+        self.notebook.add(self.io_tab, text="Device I/O")
+        self.notebook.add(self.diagnostics_tab, text="Lantronix diagnostics")
+        self.notebook.add(self.cip_tab, text="CIP Objects")
+        self.notebook.add(self.scanner_tab, text="CIP Scanner")
         interfaces = list(conf.ifaces.values())
         self.interfaces = {f"{item.name} — {item.description}": item
                            for item in interfaces}
@@ -476,20 +502,21 @@ class Application:
         self.eip_targets = tk.StringVar()
         self.arp_targets = tk.StringVar()
         self.serve = tk.BooleanVar(value=False)
-        self.status = tk.StringVar(value="Select a wired adapter, then start before powering the device.")
-        ttk.Label(panel, text="Adapter").grid(row=0, column=0, sticky="w")
+        ttk.Label(self.discovery_tab, text="Adapter").grid(row=0, column=0, sticky="w")
         self.adapter_box = ttk.Combobox(
-            panel, textvariable=self.adapter, values=list(self.interfaces),
+            self.discovery_tab, textvariable=self.adapter, values=list(self.interfaces),
             state="readonly", width=60)
         self.adapter_box.grid(row=0, column=1, columnspan=3, sticky="ew")
         self.adapter_box.bind("<<ComboboxSelected>>", self.select_adapter)
-        self.start_button = ttk.Button(panel, text="Start listening", command=self.start)
+        self.start_button = ttk.Button(
+            self.discovery_tab, text="Start listening", command=self.start)
         self.start_button.grid(row=0, column=4, padx=5)
-        self.stop_button = ttk.Button(panel, text="Stop", command=self.stop, state="disabled")
+        self.stop_button = ttk.Button(
+            self.discovery_tab, text="Stop", command=self.stop, state="disabled")
         self.stop_button.grid(row=0, column=5)
         self.config_widgets: list[ttk.Combobox | ttk.Entry | ttk.Checkbutton] = [self.adapter_box]
-        service_frame = ttk.LabelFrame(panel, text="BOOTP/DHCP service", padding=6)
-        service_frame.grid(row=1, column=0, columnspan=6, sticky="ew", pady=6)
+        service_frame = ttk.LabelFrame(self.config_tab, text="BOOTP/DHCP service", padding=6)
+        service_frame.grid(row=0, column=0, columnspan=4, sticky="ew", pady=6)
         self.service_box = ttk.Checkbutton(
             service_frame, text="Enable (isolated switch ONLY)", variable=self.serve)
         self.service_box.grid(row=0, column=0, columnspan=2, sticky="w")
@@ -505,25 +532,34 @@ class Application:
             entry.grid(row=0, column=column + 1, sticky="ew")
             self.service_entries.append(entry)
             self.config_widgets.append(entry)
-        ttk.Label(panel, text="Default scan subnet").grid(row=2, column=0, sticky="w", pady=6)
-        self.subnet_entry = ttk.Entry(panel, textvariable=self.subnet, width=18)
-        self.subnet_entry.grid(row=2, column=1, sticky="ew")
+        ttk.Label(self.discovery_tab, text="Default scan subnet").grid(
+            row=1, column=0, sticky="w", pady=6)
+        self.subnet_entry = ttk.Entry(self.discovery_tab, textvariable=self.subnet, width=18)
+        self.subnet_entry.grid(row=1, column=1, sticky="ew")
         self.config_widgets.append(self.subnet_entry)
         self.factory_alias_button = ttk.Button(
-            panel, text="Add factory alias...", command=self.add_factory_alias)
-        self.factory_alias_button.grid(row=2, column=2, padx=4)
+            self.config_tab, text="Add factory alias...", command=self.add_factory_alias)
+        self.factory_alias_button.grid(row=1, column=0, padx=(0, 6), pady=6, sticky="w")
         self.alias_cleanup_button = ttk.Button(
-            panel, text="Remove laptop alias...", command=self.remove_selected_adapter_alias,
+            self.config_tab, text="Remove laptop alias...", command=self.remove_selected_adapter_alias,
             state="disabled")
-        self.alias_cleanup_button.grid(row=2, column=3, padx=4)
+        self.alias_cleanup_button.grid(row=1, column=1, padx=6, pady=6, sticky="w")
         self.configure_button = ttk.Button(
-            panel, text="Configure selected", command=self.configure_selected, state="disabled")
-        self.configure_button.grid(row=2, column=4, padx=4)
-        self.test_io_button = ttk.Button(
-            panel, text="Test device I/O", command=self.test_selected_io, state="disabled")
-        self.test_io_button.grid(row=2, column=5, padx=4)
-        eip_frame = ttk.LabelFrame(panel, text="EtherNet/IP", padding=6)
-        eip_frame.grid(row=3, column=0, columnspan=3, sticky="ew", padx=(0, 4))
+            self.config_tab, text="Configure selected", command=self.configure_selected,
+            state="disabled")
+        self.configure_button.grid(row=1, column=2, padx=6, pady=6, sticky="w")
+        self.config_selection = tk.StringVar(value="No device selected")
+        ttk.Label(self.config_tab, textvariable=self.config_selection).grid(
+            row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ttk.Label(
+            self.config_tab,
+            text="BOOTP/DHCP assignment is intended for an authorized isolated switch with no other server.",
+            wraplength=800).grid(row=3, column=0, columnspan=3, sticky="w", pady=8)
+        self.discovery_tab.columnconfigure(1, weight=1)
+        self.config_tab.columnconfigure(3, weight=1)
+
+        eip_frame = ttk.LabelFrame(self.discovery_tab, text="EtherNet/IP discovery", padding=6)
+        eip_frame.grid(row=2, column=0, columnspan=3, sticky="ew", padx=(0, 4), pady=6)
         self.broadcast_button = ttk.Button(
             eip_frame, text="Broadcast", command=self.probe_eip_broadcast, state="disabled")
         self.broadcast_button.grid(row=0, column=0, padx=(0, 6))
@@ -534,8 +570,8 @@ class Application:
             eip_frame, text="Targeted scan", command=self.probe_eip_targeted, state="disabled")
         self.targeted_button.grid(row=0, column=3)
         eip_frame.columnconfigure(2, weight=1)
-        arp_frame = ttk.LabelFrame(panel, text="Other discovery", padding=6)
-        arp_frame.grid(row=3, column=3, columnspan=3, sticky="ew", padx=(4, 0))
+        arp_frame = ttk.LabelFrame(self.discovery_tab, text="Layer 2 discovery", padding=6)
+        arp_frame.grid(row=2, column=3, columnspan=3, sticky="ew", padx=(4, 0), pady=6)
         ttk.Label(arp_frame, text="ARP targets").grid(row=0, column=0, sticky="w")
         self.arp_target_entry = ttk.Entry(arp_frame, textvariable=self.arp_targets)
         self.arp_target_entry.grid(row=0, column=1, sticky="ew", padx=4)
@@ -545,44 +581,93 @@ class Application:
         self.xport_button = ttk.Button(
             arp_frame, text="XPort discovery", command=self.probe_xport, state="disabled")
         self.xport_button.grid(row=0, column=3)
-        self.diagnostics_button = ttk.Button(
-            arp_frame, text="Lantronix diagnostics", command=self.read_selected_diagnostics,
-            state="disabled")
-        self.diagnostics_button.grid(row=0, column=4, padx=(6, 0))
         arp_frame.columnconfigure(1, weight=1)
-        ttk.Label(panel, text="Targets accept IP, CIDR, or ranges; blank uses the default scan subnet.").grid(
-            row=4, column=0, columnspan=6, sticky="w", pady=(4, 0))
-        ttk.Label(panel, text="Start listening → choose a probe → select a device → Configure selected.").grid(
-            row=5, column=0, columnspan=6, sticky="w", pady=(2, 6))
+        ttk.Label(self.discovery_tab, text="Targets accept IP, CIDR, or ranges; blank uses the default scan subnet.").grid(
+            row=3, column=0, columnspan=6, sticky="w", pady=(2, 0))
+        ttk.Label(self.discovery_tab, text="Start listening, choose a probe, then select a device.").grid(
+            row=4, column=0, columnspan=6, sticky="w", pady=(2, 6))
+        self.communication_selection = tk.StringVar(value="No device selected")
+        self.test_io_button = ttk.Button(
+            self.io_tab, text="Load selected device", command=self.test_selected_io,
+            state="disabled")
+        self.test_io_button.grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Label(self.io_tab, textvariable=self.communication_selection).grid(
+            row=0, column=1, sticky="w")
+        # Separate container: the embedded panel uses pack, the tab itself uses grid.
+        self.io_container = ttk.Frame(self.io_tab)
+        self.io_container.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(6, 0))
+        self.io_tab.rowconfigure(1, weight=1)
+        self.io_tab.columnconfigure(1, weight=1)
+        self.diagnostics_button = ttk.Button(
+            self.diagnostics_tab, text="Read diagnostics (port 9999)",
+            command=self.read_selected_diagnostics, state="disabled")
+        self.diagnostics_button.grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Label(self.diagnostics_tab, textvariable=self.communication_selection).grid(
+            row=0, column=1, sticky="w")
+        self.diagnostics_container = ttk.Frame(self.diagnostics_tab)
+        self.diagnostics_container.grid(
+            row=1, column=0, columnspan=2, sticky="nsew", pady=(6, 0))
+        self.diagnostics_tab.rowconfigure(1, weight=1)
+        self.diagnostics_tab.columnconfigure(1, weight=1)
+        self.cip_selection = tk.StringVar(value="No device selected")
+        self.cip_events = queue.Queue()
+        self.cip_busy = False
+        ttk.Label(self.cip_tab, textvariable=self.cip_selection).grid(
+            row=0, column=0, columnspan=5, sticky="w", pady=(0, 6))
+        self.cip_buttons = []
+        for column, (label, name) in enumerate((
+                ("0x01 Identity", "Identity"), ("0xF5 TCP/IP", "TCP/IP"),
+                ("0xF6 Ethernet Link", "Ethernet Link"), ("Read all", None))):
+            button = ttk.Button(
+                self.cip_tab, text=label, state="disabled",
+                command=lambda name=name: self.read_cip_objects(name))
+            button.grid(row=1, column=column, sticky="w", padx=(0, 6), pady=(0, 6))
+            self.cip_buttons.append(button)
+        self.cip_table = ttk.Treeview(
+            self.cip_tab, columns=("object", "instance", "attribute", "name", "value", "raw"),
+            show="headings")
+        for column, title, width, stretch in (
+                ("object", "Object", 90, False), ("instance", "Inst", 40, False),
+                ("attribute", "Attr", 40, False), ("name", "Name", 200, False),
+                ("value", "Value", 520, True), ("raw", "Raw (hex)", 200, False)):
+            self.cip_table.heading(column, text=title)
+            self.cip_table.column(column, width=width, minwidth=30, stretch=stretch)
+        self.cip_table.grid(row=2, column=0, columnspan=5, sticky="nsew")
+        cip_scroll = ttk.Scrollbar(self.cip_tab, orient="vertical", command=self.cip_table.yview)
+        cip_scroll.grid(row=2, column=5, sticky="ns")
+        self.cip_table.configure(yscrollcommand=cip_scroll.set)
+        self.cip_tab.rowconfigure(2, weight=1)
+        self.cip_tab.columnconfigure(4, weight=1)
+        self.scanner = CIPScannerPanel(
+            self.scanner_tab, self.root, self._selected_target, self.open_in_device_io)
         self.probe_buttons = (
             self.broadcast_button, self.targeted_button, self.arp_button, self.xport_button)
         columns = ("mac", "ip", "candidate", "manufacturer", "protocol", "identity",
                "ip_history", "first_seen", "seen")
-        self.table = ttk.Treeview(panel, columns=columns, show="headings")
+        self.table = ttk.Treeview(self.discovery_tab, columns=columns, show="headings")
         titles = ("MAC", "Latest observed IP", "Unconfirmed address", "Manufacturer (OUI)",
               "Evidence", "EIP identity", "Observed IP history", "First seen", "Last seen")
-        widths = (140, 140, 190, 175, 130, 260, 260, 155, 155)
+        widths = (125, 110, 140, 140, 90, 200, 170, 125, 125)
         for column, title, width in zip(columns, titles, widths):
             self.table.heading(column, text=title)
-            self.table.column(column, width=width)
-        self.table.grid(row=6, column=0, columnspan=6, sticky="nsew")
+            self.table.column(column, width=width, minwidth=60,
+                              stretch=column in ("identity", "ip_history"))
+        self.table.grid(row=5, column=0, columnspan=6, sticky="nsew")
         self.table.bind("<<TreeviewSelect>>", self.update_configuration_button)
-        scroll = ttk.Scrollbar(panel, orient="vertical", command=self.table.yview)
-        scroll.grid(row=6, column=6, sticky="ns")
-        horizontal = ttk.Scrollbar(panel, orient="horizontal", command=self.table.xview)
-        horizontal.grid(row=7, column=0, columnspan=6, sticky="ew")
+        scroll = ttk.Scrollbar(self.discovery_tab, orient="vertical", command=self.table.yview)
+        scroll.grid(row=5, column=6, sticky="ns")
+        horizontal = ttk.Scrollbar(self.discovery_tab, orient="horizontal", command=self.table.xview)
+        horizontal.grid(row=6, column=0, columnspan=6, sticky="ew")
         self.table.configure(yscrollcommand=scroll.set, xscrollcommand=horizontal.set)
-        ttk.Label(panel, textvariable=self.status, wraplength=1100).grid(
-            row=8, column=0, columnspan=6, sticky="w", pady=10)
-        panel.rowconfigure(6, weight=1)
+        self.discovery_tab.rowconfigure(5, weight=1)
         for column in range(6):
-            panel.columnconfigure(column, weight=1)
+            self.discovery_tab.columnconfigure(column, weight=1)
         if self.interfaces:
             preferred = next((label for label, item in self.interfaces.items()
                               if item == conf.iface), next(iter(self.interfaces)))
             self.adapter.set(preferred)
             self.select_adapter()
-        root.after(100, self.poll)
+        self._poll_job = self.root.after(100, self.poll)
 
     def select_adapter(self, event=None):
         if event is not None and self.reservation:
@@ -659,8 +744,7 @@ class Application:
             messagebox.showerror("Cannot start", str(error))
             return False
         self.table.delete(*self.table.get_children())
-        self.configure_button.configure(state="disabled")
-        self.test_io_button.configure(state="disabled")
+        self.update_configuration_button()
         for widget in self.config_widgets:
             widget.configure(state="disabled")
         self.start_button.configure(state="disabled")
@@ -707,10 +791,91 @@ class Application:
 
     def update_configuration_button(self, event=None):
         selection = self.table.selection()
+        selected_device = "No device selected"
+        if selection:
+            values = self.table.item(selection[0], "values")
+            selected_device = f"Selected device: {values[0]}  {values[1]}".rstrip()
+        self.config_selection.set(selected_device)
+        self.communication_selection.set(selected_device)
+        self.cip_selection.set(selected_device)
         self.configure_button.configure(state="normal" if selection else "disabled")
-        self.test_io_button.configure(state="normal" if selection else "disabled")
         has_ip = bool(selection and usable_ip(self.table.set(selection[0], "ip")))
+        self.test_io_button.configure(state="normal" if has_ip else "disabled")
         self.diagnostics_button.configure(state="normal" if has_ip else "disabled")
+        for button in self.cip_buttons:
+            button.configure(state="normal" if has_ip and not self.cip_busy else "disabled")
+        self.scanner.set_target_available(has_ip)
+
+    def _selected_target(self):
+        selection = self.table.selection()
+        if not selection:
+            return None
+        values = self.table.item(selection[0], "values")
+        if not usable_ip(values[1]):
+            return None
+        return values[0], values[1], values[5] if len(values) > 5 else ""
+
+    def open_in_device_io(self, target, class_code, instance, attribute):
+        mac, ip, identity = target
+        panel = self.device_io_dialog
+        if panel is None or panel.ip != ip:
+            if panel is not None:
+                panel.close()
+            panel = self.device_io_dialog = DeviceIOTestDialog(
+                self.io_container, mac, ip, identity, inline=True)
+        panel.select_target(class_code, instance, attribute)
+        self.notebook.select(self.io_tab)
+
+    def read_cip_objects(self, object_name):
+        selection = self.table.selection()
+        if not selection or self.cip_busy:
+            return
+        address = self.table.set(selection[0], "ip")
+        if not usable_ip(address):
+            messagebox.showerror(
+                "No observed IP", "Discover or assign an IP before reading CIP objects.",
+                parent=self.root)
+            return
+        names = [object_name] if object_name else list(OBJECTS)
+        self.cip_busy = True
+        self.cip_table.delete(*self.cip_table.get_children())
+        for button in self.cip_buttons:
+            button.configure(state="disabled")
+        self.cip_selection.set(f"Reading {', '.join(names)} from {address}…")
+        threading.Thread(
+            target=self._cip_worker, args=(address, names), daemon=True).start()
+        self.root.after(50, self._poll_cip)
+
+    def _cip_worker(self, address, names):
+        for name in names:
+            try:
+                self.cip_events.put(("rows", (name, read_cip_object(address, name))))
+            except (CIPObjectError, ValueError) as error:
+                self.cip_events.put(("error", (name, str(error))))
+        self.cip_events.put(("done", address))
+
+    def _poll_cip(self):
+        while True:
+            try:
+                kind, payload = self.cip_events.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "rows":
+                name, rows = payload
+                code = OBJECTS[name][0]
+                for row in rows:
+                    self.cip_table.insert("", "end", values=(
+                        f"{code:#04x} {name}", row.instance, row.attribute,
+                        row.name, row.value, row.raw))
+            elif kind == "error":
+                name, message = payload
+                self.cip_table.insert("", "end", values=(
+                    f"{OBJECTS[name][0]:#04x} {name}", "", "", "Error", message, ""))
+            else:
+                self.cip_busy = False
+                self.update_configuration_button()
+                return
+        self.root.after(50, self._poll_cip)
 
     def read_selected_diagnostics(self):
         selection = self.table.selection()
@@ -723,7 +888,11 @@ class Application:
                 "No observed IP", "Discover or assign an IP before reading device diagnostics.",
                 parent=self.root)
             return
-        LantronixDiagnosticsDialog(self.root, mac, address)
+        if self.diagnostics_panel is not None:
+            self.diagnostics_panel.close()
+        self.diagnostics_panel = LantronixDiagnosticsDialog(
+            self.diagnostics_container, mac, address, inline=True)
+        self.diagnostics_panel.read()
 
     def test_selected_io(self):
         selection = self.table.selection()
@@ -739,7 +908,10 @@ class Application:
                 "The selected device does not have an observed IP address yet.\n"
                 "Assign or discover an IP address before testing I/O.", parent=self.root)
             return
-        DeviceIOTestDialog(self.root, mac, ip, identity)
+        if self.device_io_dialog is not None:
+            self.device_io_dialog.close()
+        self.device_io_dialog = DeviceIOTestDialog(
+            self.io_container, mac, ip, identity, inline=True)
 
     def reserve_selected_ip(self, mac, address):
         if self.worker:
@@ -918,6 +1090,8 @@ class Application:
                     self.table.item(values[0], values=values)
                 else:
                     self.table.insert("", "end", iid=values[0], values=values)
+                if values[0] in self.table.selection():
+                    self.update_configuration_button()
             elif kind in ("status", "error"):
                 self.status.set(value)
                 if kind == "status" and value.startswith("Listening"):
@@ -943,13 +1117,25 @@ class Application:
                     widget.configure(state="normal")
                 self.adapter_box.configure(state="readonly")
                 self.update_configuration_button()
-        self.root.after(100, self.poll)
+        self._poll_job = self.root.after(100, self.poll)
 
     def close(self):
         self.closing = True
+        self.scanner.close()
+        for panel in (self.device_io_dialog, self.diagnostics_panel):
+            if panel is not None:
+                panel.close()
+        self.device_io_dialog = self.diagnostics_panel = None
         if self.worker:
+            # poll() must keep running: it destroys the window after the worker stops.
             self.stop()
         else:
+            if self._poll_job is not None:
+                try:
+                    self.root.after_cancel(self._poll_job)
+                except tk.TclError:
+                    pass
+                self._poll_job = None
             self._restore_adapter_aliases()
             self.root.destroy()
 

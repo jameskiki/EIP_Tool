@@ -14,6 +14,7 @@ from typing import Optional
 from pycomm3 import CIPDriver, Services
 
 from .discovery import usable_ip
+from .io_connection import IOConnection, IOConnectionConfig
 
 
 class CIPDeviceIOError(RuntimeError):
@@ -256,11 +257,12 @@ def format_raw_hex(data: bytes) -> str:
 class DeviceIOTestDialog:
     """Dialog for testing peripheral functionality (reading/writing CIP Assembly data)."""
 
-    def __init__(self, root, mac: str, ip: str, identity: str = ""):
+    def __init__(self, root, mac: str, ip: str, identity: str = "", inline: bool = False):
         self.root = root
         self.mac = mac
         self.ip = ip
         self.identity = identity
+        self.inline = inline
         self.polling = False
         self.poll_thread = None
         self.last_data = b""
@@ -269,13 +271,17 @@ class DeviceIOTestDialog:
         self.event_queue = queue.Queue()
         self._poll_job = None
 
-        self.window = tk.Toplevel(root)
-        self.window.title(f"Device I/O Test — {ip} ({mac})")
-        self.window.geometry("860x720")
-        self.window.transient(root)
-        self.window.protocol("WM_DELETE_WINDOW", self.close)
+        if inline:
+            self.window = ttk.Frame(root)
+            self.window.pack(fill="both", expand=True)
+        else:
+            self.window = tk.Toplevel(root)
+            self.window.title(f"Device I/O Test — {ip} ({mac})")
+            self.window.geometry("860x720")
+            self.window.transient(root)
+            self.window.protocol("WM_DELETE_WINDOW", self.close)
 
-        panel = ttk.Frame(self.window, padding=10)
+        panel = ttk.Frame(self.window, padding=0 if inline else 10)
         panel.pack(fill="both", expand=True)
 
         # Device info header
@@ -320,6 +326,46 @@ class DeviceIOTestDialog:
         ttk.Label(obj_frame, textvariable=self.expected_label_var, foreground="#555").grid(
             row=2, column=0, columnspan=6, sticky="w", pady=(4, 0))
 
+        # Cyclic Class 1 I/O connection (like a PLC owning the device)
+        self.io_connection = None
+        self._io_last_push = 0.0
+        self._io_last_data = None
+        io_frame = ttk.LabelFrame(
+            panel, text="Cyclic I/O connection (Class 1, like a PLC)", padding=6)
+        io_frame.pack(fill="x", pady=(0, 6))
+        self.io_input_inst = tk.StringVar(value="101")
+        self.io_input_size = tk.StringVar(value="108")
+        self.io_output_inst = tk.StringVar(value="102")
+        self.io_output_size = tk.StringVar(value="32")
+        self.io_config_inst = tk.StringVar(value="128")
+        self.io_rpi = tk.StringVar(value="500")
+        column = 0
+        for label, var, width in (
+                ("Input inst", self.io_input_inst, 6), ("bytes", self.io_input_size, 5),
+                ("Output inst", self.io_output_inst, 6), ("bytes", self.io_output_size, 5),
+                ("Config inst", self.io_config_inst, 6)):
+            ttk.Label(io_frame, text=label).grid(row=0, column=column, sticky="w", padx=(0, 3))
+            ttk.Entry(io_frame, textvariable=var, width=width).grid(
+                row=0, column=column + 1, sticky="w", padx=(0, 10))
+            column += 2
+        ttk.Label(io_frame, text="RPI (ms)").grid(row=0, column=column, sticky="w", padx=(0, 3))
+        ttk.Combobox(io_frame, textvariable=self.io_rpi, width=6,
+                     values=["100", "200", "500", "1000", "1500", "2000"]).grid(
+            row=0, column=column + 1, sticky="w")
+        io_ctrl = ttk.Frame(io_frame)
+        io_ctrl.grid(row=1, column=0, columnspan=column + 2, sticky="ew", pady=(4, 0))
+        self.io_button = ttk.Button(
+            io_ctrl, text="Open I/O connection", command=self.toggle_io_connection)
+        self.io_button.pack(side="left")
+        self.io_run_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(io_ctrl, text="Run mode (outputs active)", variable=self.io_run_var,
+                        command=self._on_io_run_changed).pack(side="left", padx=(10, 0))
+        self.io_status_var = tk.StringVar(
+            value="Not connected. Open a connection if explicit reads only return zeros.")
+        self.io_status_lbl = ttk.Label(io_ctrl, textvariable=self.io_status_var)
+        self.io_status_lbl.pack(side="left", padx=(10, 0))
+        self._apply_io_sizes(PRESETS[0])
+
         # Read Panel
         read_frame = ttk.LabelFrame(panel, text="Read Peripheral Data (Get_Attribute_Single)", padding=6)
         read_frame.pack(fill="both", expand=True, pady=(0, 6))
@@ -359,7 +405,8 @@ class DeviceIOTestDialog:
         self.alive_status_lbl = ttk.Label(alive_bar, textvariable=self.alive_status_var, font=("Segoe UI", 9))
         self.alive_status_lbl.pack(side="left")
 
-        self.data_text = ScrolledText(read_frame, height=12, wrap="none", font=("Consolas", 10))
+        self.data_text = ScrolledText(
+            read_frame, height=6 if inline else 12, wrap="none", font=("Consolas", 10))
         self.data_text.pack(fill="both", expand=True, pady=(0, 4))
         self.data_text.insert("1.0", "(No data read yet. Click 'Read Once' or 'Start Polling')")
         self.data_text.configure(state="disabled")
@@ -396,9 +443,10 @@ class DeviceIOTestDialog:
         ttk.Label(write_frame, textvariable=self.write_status_var, relief="sunken", anchor="w").pack(fill="x")
 
         # Bottom Close Button
-        btn_box = ttk.Frame(panel)
-        btn_box.pack(fill="x", pady=(4, 0))
-        ttk.Button(btn_box, text="Close", command=self.close).pack(side="right")
+        if not inline:
+            btn_box = ttk.Frame(panel)
+            btn_box.pack(fill="x", pady=(4, 0))
+            ttk.Button(btn_box, text="Close", command=self.close).pack(side="right")
 
         self._poll_job = self.root.after(50, self._poll_event_queue)
 
@@ -420,6 +468,16 @@ class DeviceIOTestDialog:
                     self._on_write_success(payload)
                 elif kind == "write_error":
                     self._on_write_error(payload)
+                elif kind == "io_started":
+                    self._on_io_started(payload)
+                elif kind == "io_data":
+                    self._on_io_data_ui(payload)
+                elif kind == "io_event":
+                    self._on_io_event(*payload)
+                elif kind == "io_error":
+                    self._on_io_error(payload)
+                elif kind == "io_closed":
+                    self._on_io_closed(payload)
             if self._poll_job is not None:
                 try:
                     self.root.after_cancel(self._poll_job)
@@ -466,6 +524,33 @@ class DeviceIOTestDialog:
             self.alive_val_var.set("--")
             self.alive_status_var.set("(Click 'Read Once' or 'Start Polling')")
             self.alive_status_lbl.configure(foreground="#333333")
+            if self.io_connection is None:
+                self._apply_io_sizes(p)
+
+    def _apply_io_sizes(self, preset):
+        """Fill the I/O connection sizes from the input/output presets of the same device model."""
+        device = preset.get("device")
+        if device in (None, "Generic", "Custom"):
+            return
+        for p in PRESETS:
+            if p.get("device") == device and p["instance"] == 101:
+                self.io_input_inst.set("101")
+                self.io_input_size.set(str(p["expected_bytes"]))
+            elif p.get("device") == device and p["instance"] == 102:
+                self.io_output_inst.set("102")
+                self.io_output_size.set(str(p["expected_bytes"]))
+
+    def select_target(self, class_code: int, instance: int, attribute: int):
+        """Switch to the custom preset and target the given CIP path (used by the scanner)."""
+        if self.polling:
+            self.toggle_polling()
+        self.preset_var.set(PRESETS[-1]["name"])
+        self._on_preset_selected()
+        self.class_var.set(f"0x{class_code:02X}")
+        self.inst_var.set(str(instance))
+        self.attr_var.set(str(attribute))
+        self.expected_label_var.set(
+            f"From CIP scanner: Class 0x{class_code:02X}, Instance {instance}, Attribute {attribute}")
 
     def _get_cip_targets(self):
         try:
@@ -495,7 +580,7 @@ class DeviceIOTestDialog:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_read_success(self, data: bytes):
+    def _on_read_success(self, data: bytes, source: str = ""):
         try:
             if not self.window.winfo_exists():
                 return
@@ -503,7 +588,8 @@ class DeviceIOTestDialog:
             self.last_data = data
             now_str = datetime.now().strftime("%H:%M:%S")
             words = len(data) // 2
-            self.read_status_var.set(f"Last read: {len(data)} bytes ({words} words) at {now_str} — Success")
+            self.read_status_var.set(
+                f"{source or 'Last read'}: {len(data)} bytes ({words} words) at {now_str} — Success")
 
             # Check alive counter for the current model
             preset = self._current_preset()
@@ -690,6 +776,24 @@ class DeviceIOTestDialog:
             messagebox.showwarning("Empty Write Data", "Please enter data to write (in hex format).", parent=self.window)
             return
 
+        if self.io_connection is not None and self.io_connection.running:
+            size = self.io_connection.config.output_size
+            prompt = (f"Send {len(data)} bytes as cyclic output data of the I/O connection?\n"
+                      f"Device IP: {self.ip}, Output instance "
+                      f"{self.io_connection.config.output_instance} ({size} bytes"
+                      f"{', shorter data is zero-padded' if len(data) < size else ''}"
+                      f"{', longer data is truncated' if len(data) > size else ''}).\n\n"
+                      + ("Run mode is ON: the peripheral outputs will follow this data."
+                         if self.io_run_var.get() else
+                         "Run mode is OFF: the device receives the data but keeps outputs idle."))
+            if not messagebox.askyesno("Confirm I/O Output", prompt, parent=self.window):
+                return
+            sent = self.io_connection.set_output(data)
+            now_str = datetime.now().strftime("%H:%M:%S")
+            self.write_status_var.set(
+                f"I/O connection output set to {len(sent)} bytes at {now_str} (sent every RPI)")
+            return
+
         words = len(data) // 2
         prompt = (f"Are you sure you want to write {len(data)} bytes ({words} words) to:\n"
                   f"Device IP: {self.ip}\n"
@@ -731,8 +835,127 @@ class DeviceIOTestDialog:
         except tk.TclError:
             pass
 
+    def _io_config(self) -> IOConnectionConfig:
+        try:
+            config = IOConnectionConfig(
+                input_instance=self._parse_int(self.io_input_inst.get()),
+                input_size=self._parse_int(self.io_input_size.get()),
+                output_instance=self._parse_int(self.io_output_inst.get()),
+                output_size=self._parse_int(self.io_output_size.get()),
+                config_instance=self._parse_int(self.io_config_inst.get()),
+                rpi_ms=float(self.io_rpi.get()))
+        except ValueError as err:
+            raise ValueError(f"Invalid I/O connection setting: {err}") from err
+        config.validate()
+        return config
+
+    def _set_io_status(self, text, color="#333333"):
+        self.io_status_var.set(text)
+        self.io_status_lbl.configure(foreground=color)
+
+    def toggle_io_connection(self):
+        if self.io_connection is not None:
+            connection, self.io_connection = self.io_connection, None
+            self.io_button.configure(state="disabled")
+            self._set_io_status("Closing I/O connection...")
+            threading.Thread(
+                target=lambda: self.event_queue.put(("io_closed", connection.stop())),
+                daemon=True).start()
+            return
+        try:
+            config = self._io_config()
+        except ValueError as err:
+            messagebox.showerror("Invalid I/O Connection", str(err), parent=self.window)
+            return
+        if self.polling:
+            self.toggle_polling()
+        connection = IOConnection(
+            self.ip, config, on_data=self._on_io_data,
+            on_event=lambda kind, text: self.event_queue.put(("io_event", (kind, text))))
+        connection.set_run(self.io_run_var.get())
+        self.io_connection = connection
+        self._io_last_data = None
+        self.io_button.configure(state="disabled")
+        self._set_io_status(f"Opening I/O connection (Forward_Open) to {self.ip}...")
+
+        def worker():
+            try:
+                info = connection.start()
+            except Exception as err:
+                self.event_queue.put(("io_error", (connection, str(err))))
+                return
+            if connection is not self.io_connection:
+                connection.stop()  # panel was closed while Forward_Open was in progress
+                return
+            self.event_queue.put(("io_started", (connection, info)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_io_data(self, data: bytes):
+        # Runs on the I/O thread at the RPI; forward changes immediately, otherwise twice a second.
+        now = time.monotonic()
+        if data != self._io_last_data or now - self._io_last_push >= 0.5:
+            self._io_last_data = data
+            self._io_last_push = now
+            self.event_queue.put(("io_data", data))
+
+    def _on_io_run_changed(self):
+        if self.io_connection is not None:
+            self.io_connection.set_run(self.io_run_var.get())
+
+    def _on_io_started(self, payload):
+        connection, info = payload
+        if connection is not self.io_connection:
+            threading.Thread(target=connection.stop, daemon=True).start()
+            return
+        self.io_button.configure(state="normal", text="Close I/O connection")
+        mode = "multicast" if connection.multicast else "point-to-point"
+        self._set_io_status(
+            f"Connected ({mode}, RPI {connection.config.rpi_ms:g} ms). Waiting for input...",
+            "#0066cc")
+        self.write_status_var.set(
+            f"Cyclic output: {connection.config.output_size} zero bytes until you click "
+            "'Write to Device'")
+
+    def _on_io_data_ui(self, data: bytes):
+        connection = self.io_connection
+        if connection is None:
+            return
+        self._on_read_success(data, "I/O connection")
+        self._set_io_status(
+            f"Connected — {connection.rx_count} input / {connection.tx_count} output packets"
+            f" ({'Run' if connection.run else 'Idle'})", "#008800")
+
+    def _on_io_event(self, kind, text):
+        if self.io_connection is None:
+            return
+        if kind == "input_resumed":
+            self._set_io_status(text, "#008800")
+            return
+        self._set_io_status(text, "#cc6600" if kind == "no_input" else "#cc0000")
+        if kind == "error":
+            self.toggle_io_connection()
+
+    def _on_io_error(self, payload):
+        connection, message = payload
+        if connection is not self.io_connection:
+            return
+        self.io_connection = None
+        self.io_button.configure(state="normal", text="Open I/O connection")
+        self._set_io_status(f"Not connected: {message}", "#cc0000")
+        messagebox.showerror("I/O Connection Failed", message, parent=self.window)
+
+    def _on_io_closed(self, closed: bool):
+        self.io_button.configure(state="normal", text="Open I/O connection")
+        self._set_io_status(
+            "I/O connection closed." if closed else
+            "I/O traffic stopped; Forward_Close got no confirmation (device will time out).")
+
     def close(self):
         self.polling = False
+        if self.io_connection is not None:
+            connection, self.io_connection = self.io_connection, None
+            connection.stop()
         if self._poll_job is not None:
             try:
                 self.root.after_cancel(self._poll_job)

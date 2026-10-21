@@ -1,8 +1,14 @@
 import os
+import time
 import unittest
 from ipaddress import IPv4Network
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+
+
+def panel_presets():
+    from eip_tool.device_io import PRESETS
+    return PRESETS
 
 
 @unittest.skipUnless(os.environ.get("DISPLAY") or os.name == "nt", "GUI requires a display")
@@ -14,6 +20,20 @@ class GuiTests(unittest.TestCase):
         self.root.withdraw()
         self.app = Application(self.root)
         self.addCleanup(self.root.destroy)
+
+    def test_device_table_stays_visible_above_detail_tabs(self):
+        tabs = [self.app.notebook.tab(tab, "text") for tab in self.app.notebook.tabs()]
+        self.assertEqual(
+            tabs, ["Config", "Device I/O", "Lantronix diagnostics", "CIP Objects", "CIP Scanner"])
+        self.assertEqual(
+            [str(pane) for pane in self.app.paned.panes()],
+            [str(self.app.discovery_tab), str(self.app.notebook)])
+        self.assertIs(self.app.adapter_box.master, self.app.discovery_tab)
+        self.assertIs(self.app.table.master, self.app.discovery_tab)
+        self.assertIs(self.app.service_box.master.master, self.app.config_tab)
+        self.assertIs(self.app.configure_button.master, self.app.config_tab)
+        self.assertIs(self.app.test_io_button.master, self.app.io_tab)
+        self.assertIs(self.app.diagnostics_button.master, self.app.diagnostics_tab)
 
     def test_live_device_events_update_one_row_per_mac(self):
         row = ("00:00:bc:01:02:03", "", "169.254.5.6 (probe)",
@@ -74,6 +94,8 @@ class GuiTests(unittest.TestCase):
             mac, ip, "", "", "", "XPort-EIP-MB", "192.168.0.20, 192.168.1.20", "", ""))
         self.app.table.selection_set(mac)
         self.app.update_configuration_button()
+        self.assertEqual(self.app.config_selection.get(), f"Selected device: {mac}  {ip}")
+        self.assertEqual(self.app.communication_selection.get(), f"Selected device: {mac}  {ip}")
         self.assertEqual(str(self.app.configure_button["state"]), "normal")
         self.assertEqual(str(self.app.test_io_button["state"]), "normal")
         self.assertEqual(str(self.app.diagnostics_button["state"]), "normal")
@@ -89,9 +111,27 @@ class GuiTests(unittest.TestCase):
         self.app.table.selection_set(mac)
         self.app.update_configuration_button()
         self.assertEqual(str(self.app.diagnostics_button["state"]), "normal")
-        with patch("eip_tool.gui.LantronixDiagnosticsDialog") as dialog:
+        with patch("eip_tool.lantronix_diagnostics.read_lantronix_diagnostics",
+                   return_value="Model: XPort") as read:
             self.app.read_selected_diagnostics()
-        dialog.assert_called_once_with(self.root, mac, ip)
+            first = self.app.diagnostics_panel
+            self.app.read_selected_diagnostics()
+            for _ in range(40):
+                self.root.update()
+                if "Model: XPort" in self.app.diagnostics_panel.output.get("1.0", "end"):
+                    break
+                time.sleep(0.02)
+        read.assert_called_with(ip)
+        self.assertIs(self.app.diagnostics_panel.window.master, self.app.diagnostics_container)
+        self.assertFalse(first.window.winfo_exists())
+        self.assertEqual(len(self.app.diagnostics_container.winfo_children()), 1)
+        self.assertIn("Model: XPort", self.app.diagnostics_panel.output.get("1.0", "end"))
+
+    def test_close_while_listening_keeps_event_polling_until_worker_stops(self):
+        self.app.worker = Mock()
+        self.app.close()
+        self.app.worker.stop.assert_called_once()
+        self.assertIn(self.app._poll_job, self.root.tk.splitlist(self.root.tk.call("after", "info")))
 
     def test_diagnostics_button_requires_observed_ip(self):
         mac = "00:80:a3:d7:b7:f5"
@@ -107,9 +147,110 @@ class GuiTests(unittest.TestCase):
         self.app.table.insert("", "end", iid=mac, values=(
             mac, ip, "", "", "", "XPort-EIP-MB", "192.168.1.20", "", ""))
         self.app.table.selection_set(mac)
-        with patch("eip_tool.gui.DeviceIOTestDialog") as io_dialog:
-            self.app.test_selected_io()
-        io_dialog.assert_called_once_with(self.root, mac, ip, "XPort-EIP-MB")
+        self.app.test_selected_io()
+        first = self.app.device_io_dialog
+        self.app.test_selected_io()
+        panel = self.app.device_io_dialog
+        self.assertIs(panel.window.master, self.app.io_container)
+        self.assertEqual((panel.mac, panel.ip, panel.identity), (mac, ip, "XPort-EIP-MB"))
+        self.assertFalse(first.window.winfo_exists())
+        self.assertEqual(len(self.app.io_container.winfo_children()), 1)
+
+    def test_cip_scanner_lists_attributes_and_opens_them_in_device_io(self):
+        from eip_tool.cip_scanner import AttributeResult, ClassResult, InstanceResult
+        mac = "00:00:bc:01:02:03"
+        ip = "192.168.1.20"
+        self.app.table.insert("", "end", iid=mac, values=(
+            mac, ip, "", "", "", "XPort-EIP-MB", ip, "", ""))
+        self.app.table.selection_set(mac)
+        self.app.update_configuration_button()
+        scanner = self.app.scanner
+        self.assertEqual(str(scanner.scan_button["state"]), "normal")
+        data = AttributeResult(0x04, 101, 3, 0, bytes(4))
+        result = ClassResult(0x04, "range", [], [InstanceResult(101, [data])])
+
+        def fake_scan(address, options, progress, stop_event):
+            self.assertEqual(address, ip)
+            progress("Scanning", 1, 1)
+            yield result
+
+        with patch("eip_tool.cip_scanner_panel.scan_device", side_effect=fake_scan):
+            scanner.start()
+            for _ in range(100):
+                self.root.update()
+                if not scanner.scanning:
+                    break
+                time.sleep(0.02)
+        self.assertFalse(scanner.scanning)
+        self.assertIn("Found 1 class(es)", scanner.status.get())
+        self.assertEqual(str(scanner.export_button["state"]), "normal")
+        attribute_node = next(iid for iid, path in scanner.paths.items()
+                              if path == (0x04, 101, 3))
+        scanner.tree.selection_set(attribute_node)
+        scanner.send_to_device_io()
+        panel = self.app.device_io_dialog
+        self.assertEqual(panel.ip, ip)
+        self.assertEqual((panel.class_var.get(), panel.inst_var.get(), panel.attr_var.get()),
+                         ("0x04", "101", "3"))
+        self.assertEqual(self.app.notebook.select(), str(self.app.io_tab))
+
+    def test_device_io_cyclic_connection_shows_inputs_and_sets_outputs(self):
+        mac = "00:80:a3:6c:05:0e"
+        ip = "192.168.20.25"
+        self.app.table.insert("", "end", iid=mac, values=(
+            mac, ip, "", "", "", "XPort-EIP-MB", ip, "", ""))
+        self.app.table.selection_set(mac)
+        self.app.test_selected_io()
+        panel = self.app.device_io_dialog
+        mai315 = next(p for p in panel_presets() if p["name"].startswith("VT-019279")
+                      and p["instance"] == 101)
+        panel.preset_var.set(mai315["name"])
+        panel._on_preset_selected()
+        self.assertEqual((panel.io_input_size.get(), panel.io_output_size.get()), ("24", "16"))
+
+        with patch("eip_tool.device_io.IOConnection") as connection_class:
+            connection = connection_class.return_value
+            connection.start.return_value = {"o_t_id": 1, "t_o_id": 2}
+            connection.multicast = False
+            connection.running = True
+            connection.rx_count, connection.tx_count, connection.run = 1, 1, False
+            connection.config.rpi_ms = 100
+            connection.config.output_size = 16
+            connection.config.output_instance = 102
+            connection.set_output.side_effect = lambda data: data.ljust(16, b"\0")
+            connection.stop.return_value = True
+            panel.toggle_io_connection()
+            config = connection_class.call_args.args[1]
+            self.assertEqual((config.input_instance, config.input_size, config.output_size,
+                              config.config_instance), (101, 24, 16, 128))
+            for _ in range(50):
+                self.root.update()
+                if panel.io_button["text"] == "Close I/O connection":
+                    break
+                time.sleep(0.02)
+            self.assertEqual(panel.io_button["text"], "Close I/O connection")
+            data = bytes(14) + b"\x07\x00" + bytes(8)
+            connection_class.call_args.kwargs["on_data"](data)
+            for _ in range(20):
+                self.root.update()
+                if panel.last_data == data:
+                    break
+                time.sleep(0.02)
+            self.assertEqual(panel.last_data, data)
+            self.assertIn("I/O connection", panel.read_status_var.get())
+            self.assertEqual(panel.alive_val_var.get(), "7 (0x0007)")
+            panel.write_text.insert(0, "01 02")
+            with patch("eip_tool.device_io.messagebox.askyesno", return_value=True):
+                panel.write_data()
+            connection.set_output.assert_called_once_with(b"\x01\x02")
+            panel.toggle_io_connection()
+            for _ in range(50):
+                self.root.update()
+                if panel.io_button["text"] == "Open I/O connection":
+                    break
+                time.sleep(0.02)
+        connection.stop.assert_called_once()
+        self.assertEqual(panel.io_status_var.get(), "I/O connection closed.")
 
     def test_test_selected_io_without_observed_ip_shows_error(self):
         mac = "00:00:bc:01:02:03"
